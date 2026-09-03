@@ -66,6 +66,56 @@ async function readErrorText(res: Response): Promise<string> {
   }
 }
 
+interface AnthropicErrorInfo {
+  type: string | null;
+  message: string | null;
+}
+
+function parseAnthropicError(body: string): AnthropicErrorInfo {
+  try {
+    const parsed = JSON.parse(body) as { error?: { type?: string; message?: string } };
+    return {
+      type: parsed.error?.type ?? null,
+      message: parsed.error?.message ?? null,
+    };
+  } catch {
+    return { type: null, message: body || null };
+  }
+}
+
+// Some upstream errors mean the account can't serve this request or any other
+// one until its billing / quota window changes, but Anthropic returns them as
+// plain 400s / 403s (not 429). Recognize the common shapes so the pool marks
+// the account unusable and retries on the next available account instead of
+// bubbling the error up to the client on the first attempt.
+function classifyAccountUnusable(
+  status: number,
+  info: AnthropicErrorInfo,
+): { unusable: true; reason: string; cooldownSeconds: number } | null {
+  if (status !== 400 && status !== 402 && status !== 403) return null;
+  const msg = (info.message ?? "").toLowerCase();
+
+  // API key: pay-as-you-go account with no balance.
+  if (msg.includes("credit balance") || msg.includes("credits balance") || msg.includes("insufficient credit")) {
+    return { unusable: true, reason: "no credit", cooldownSeconds: 60 * 60 };
+  }
+
+  // OAuth subscription: exhausted for the current billing / weekly / 5-hour window.
+  // Anthropic phrases these several ways — match on the recurring stems.
+  const subscriptionExhausted =
+    msg.includes("out of") && (msg.includes("usage") || msg.includes("extra")) ||
+    msg.includes("quota exceeded") ||
+    msg.includes("reached your") && msg.includes("limit") ||
+    msg.includes("workspace admin") ||
+    msg.includes("usage limit") ||
+    info.type === "permission_error" && msg.includes("subscription");
+  if (subscriptionExhausted) {
+    return { unusable: true, reason: "quota exhausted", cooldownSeconds: 60 * 60 };
+  }
+
+  return null;
+}
+
 async function attempt(
   account: Account,
   cfg: Config,
@@ -143,7 +193,38 @@ async function attempt(
       };
     }
 
-    // 4xx other than 401/429: client error, don't retry on another account —
+    // Some 400/403 responses mean the account itself is spent for now (subs
+    // out of usage, API keys with no credit). Recognize them and treat like a
+    // long-cooldown 429 so the pool moves to the next account.
+    if (res.status === 400 || res.status === 402 || res.status === 403) {
+      const errorText = await readErrorText(res);
+      const info = parseAnthropicError(errorText);
+      const verdict = classifyAccountUnusable(res.status, info);
+      if (verdict) {
+        account.markLimited(verdict.cooldownSeconds, verdict.reason);
+        return {
+          ok: false,
+          status: res.status,
+          headers: res.headers,
+          body: null,
+          retryable: true,
+          cooldownSeconds: verdict.cooldownSeconds,
+          errorText,
+        };
+      }
+      // Not an account-unusable error — surface as a normal client error.
+      return {
+        ok: false,
+        status: res.status,
+        headers: res.headers,
+        body: null,
+        retryable: false,
+        cooldownSeconds: null,
+        errorText,
+      };
+    }
+
+    // Other 4xx: client error, don't retry on another account —
     // the same request will fail the same way there. Surface it upstream.
     return {
       ok: false,
