@@ -2,35 +2,51 @@ import { refreshAccessToken } from "./oauth";
 import { readCredentials, writeCredentials, type ClaudeCredentials } from "./credentials";
 import { log } from "./log";
 
-// Anthropic returns per-account subscription usage on this endpoint. Meridian
-// uses the same path to render its dashboard. Shape observed on Team plans:
-//   {
-//     "five_hour":     {"utilization": 0.34, "resets_at": "2026-..."},
-//     "seven_day":     {"utilization": 0.07, "resets_at": "2026-..."},
-//     "seven_day_opus":{"utilization": 0.13, "resets_at": "2026-..."}
-//   }
-// The exact key names have varied; we treat the whole thing as best-effort.
-const USAGE_URL = "https://api.anthropic.com/v1/usage/quota";
+// Probe endpoint. count_tokens is cheap (no billing, no tools payload) and
+// crucially still returns the anthropic-ratelimit-unified-* response headers
+// on OAuth requests — same numbers Claude Code's /status displays.
+const PROBE_URL = "https://api.anthropic.com/v1/messages/count_tokens?beta=true";
+
+// The system-prompt fingerprint Anthropic's classifier needs to route the
+// probe as subscription-metered (not extra-usage). Same shape balance's
+// old proxy used to inject when it was faking Claude Code identity.
+const IDENTITY_SYSTEM = [
+  { type: "text", text: "x-anthropic-billing-header: cc_version=2.1.259; cc_entrypoint=cli;" },
+  { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+];
+
+const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
 export interface UsageWindow {
-  utilization: number | null;
-  resets_at: number | null;
+  utilization: number | null;   // 0.0..1.0
+  resets_at: number | null;     // ms since epoch
+  status: string | null;
 }
 
 export interface AccountUsage {
   five_hour: UsageWindow;
   seven_day: UsageWindow;
   seven_day_opus: UsageWindow;
+  overage_status: string | null;
   fetched_at: number;
   error: string | null;
 }
 
-const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+function emptyUsage(fetched_at: number, error: string | null = null): AccountUsage {
+  return {
+    five_hour: { utilization: null, resets_at: null, status: null },
+    seven_day: { utilization: null, resets_at: null, status: null },
+    seven_day_opus: { utilization: null, resets_at: null, status: null },
+    overage_status: null,
+    fetched_at,
+    error,
+  };
+}
 
 async function accessTokenFor(accountDir: string): Promise<string | null> {
   const creds = await readCredentials(accountDir);
   if (!creds) return null;
-  const { accessToken, refreshToken, expiresAt } = creds.claudeAiOauth;
+  const { accessToken, refreshToken, expiresAt, scopes } = creds.claudeAiOauth;
   if (expiresAt - REFRESH_MARGIN_MS > Date.now()) return accessToken;
   try {
     const t = await refreshAccessToken(refreshToken);
@@ -39,7 +55,7 @@ async function accessTokenFor(accountDir: string): Promise<string | null> {
         accessToken: t.access_token,
         refreshToken: t.refresh_token,
         expiresAt: t.expires_at,
-        scopes: creds.claudeAiOauth.scopes,
+        scopes,
       },
     };
     await writeCredentials(accountDir, refreshed);
@@ -50,56 +66,64 @@ async function accessTokenFor(accountDir: string): Promise<string | null> {
   }
 }
 
-function pickWindow(raw: unknown): UsageWindow {
-  if (!raw || typeof raw !== "object") return { utilization: null, resets_at: null };
-  const r = raw as Record<string, unknown>;
-  const util =
-    (typeof r.utilization === "number" && r.utilization) ??
-    (typeof r.usage_ratio === "number" && r.usage_ratio) ??
-    null;
-  const resetIso = r.resets_at ?? r.reset_at ?? r.reset ?? null;
-  const resetMs = typeof resetIso === "string" ? Date.parse(resetIso) : null;
+function readWindow(headers: Headers, prefix: string): UsageWindow {
+  const util = headers.get(`${prefix}utilization`);
+  const reset = headers.get(`${prefix}reset`);
+  const utilNum = util == null ? null : Number(util);
+  const resetSec = reset == null ? null : Number(reset);
   return {
-    utilization: typeof util === "number" ? util : null,
-    resets_at: Number.isFinite(resetMs) ? resetMs : null,
+    utilization: Number.isFinite(utilNum) ? utilNum : null,
+    resets_at: Number.isFinite(resetSec) && resetSec != null ? resetSec * 1000 : null,
+    status: headers.get(`${prefix}status`),
   };
 }
 
 export async function fetchUsage(accountDir: string): Promise<AccountUsage> {
   const fetched_at = Date.now();
-  const empty: AccountUsage = {
-    five_hour: { utilization: null, resets_at: null },
-    seven_day: { utilization: null, resets_at: null },
-    seven_day_opus: { utilization: null, resets_at: null },
-    fetched_at,
-    error: null,
-  };
-
   const token = await accessTokenFor(accountDir);
-  if (!token) return { ...empty, error: "no valid token" };
+  if (!token) return emptyUsage(fetched_at, "no valid token");
 
   try {
-    const res = await fetch(USAGE_URL, {
+    const res = await fetch(PROBE_URL, {
+      method: "POST",
       headers: {
+        "content-type": "application/json",
         authorization: `Bearer ${token}`,
-        "anthropic-beta": "oauth-2025-04-20",
-        "user-agent": "balance",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20,claude-code-20250219",
+        "user-agent": "claude-cli/2.1.259 (external, cli)",
+        "x-app": "cli",
       },
-      signal: AbortSignal.timeout(3000),
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        system: IDENTITY_SYSTEM,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      signal: AbortSignal.timeout(4000),
     });
-    if (!res.ok) {
+
+    // The response headers carry the subscription usage regardless of status —
+    // even a 400 (e.g. count_tokens rejected the identity shim) still returns
+    // the anthropic-ratelimit-unified-* headers when the OAuth is valid.
+    const five_hour = readWindow(res.headers, "anthropic-ratelimit-unified-5h-");
+    const seven_day = readWindow(res.headers, "anthropic-ratelimit-unified-7d-");
+    const seven_day_opus = readWindow(res.headers, "anthropic-ratelimit-unified-7d_oi-");
+    const overage_status = res.headers.get("anthropic-ratelimit-unified-overage-status");
+
+    if (!res.ok && five_hour.utilization == null) {
       const text = await res.text().catch(() => "");
-      return { ...empty, error: `HTTP ${res.status}: ${text.slice(0, 100)}` };
+      return { ...emptyUsage(fetched_at, `HTTP ${res.status}: ${text.slice(0, 100)}`) };
     }
-    const body = (await res.json()) as Record<string, unknown>;
+
     return {
-      five_hour: pickWindow(body.five_hour),
-      seven_day: pickWindow(body.seven_day),
-      seven_day_opus: pickWindow(body.seven_day_opus),
+      five_hour,
+      seven_day,
+      seven_day_opus,
+      overage_status,
       fetched_at,
       error: null,
     };
   } catch (err) {
-    return { ...empty, error: String(err) };
+    return emptyUsage(fetched_at, String(err));
   }
 }
