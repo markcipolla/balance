@@ -1,6 +1,6 @@
 {
   "name": "balance",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Pick a Claude account and launch Claude Code with it. Manages isolated CLAUDE_CONFIG_DIRs so one machine can hold multiple Claude Code accounts side-by-side.",
   "type": "module",
   "bin": {
