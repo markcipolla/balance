@@ -174,17 +174,18 @@ export class SubscriptionAccount extends BaseAccount {
   async applyAuth(headers: Headers): Promise<void> {
     const t = await this.token();
     headers.set("authorization", `Bearer ${t}`);
-    // OAuth-authenticated Messages requests need this beta header to enable
-    // the OAuth code path at all.
+    // Anthropic classifies OAuth requests as subscription-metered vs extra-
+    // usage / API-billed based on how much the request looks like Claude
+    // Code. `oauth-*` enables OAuth Bearer at all; `claude-code-*` identifies
+    // the caller as Claude Code specifically so requests bill against
+    // included subscription quota. Preserve any extra betas the downstream
+    // client passed through (opencode, SDKs) so their feature flags stay on.
     const existing = headers.get("anthropic-beta");
-    const parts = new Set<string>(["oauth-2025-04-20"]);
+    const parts = new Set<string>(["oauth-2025-04-20", "claude-code-20250219"]);
     if (existing) for (const p of existing.split(",")) { const t = p.trim(); if (t) parts.add(t); }
     headers.set("anthropic-beta", Array.from(parts).join(","));
-    // For Anthropic to route these requests as subscription-metered (as
-    // opposed to falling into the org's extra-usage / API-billed tier), the
-    // request has to look like it's coming from the Claude Code CLI. Overwrite
-    // the client's user-agent + set the CLI's x-app marker.
-    headers.set("user-agent", "claude-cli/1.0.117 (external, cli)");
+    // Overwrite the client's identity — the classifier reads these.
+    headers.set("user-agent", "claude-cli/2.1.236 (external, cli)");
     headers.set("x-app", "cli");
   }
 }

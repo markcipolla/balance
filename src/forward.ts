@@ -32,7 +32,7 @@ async function buildUpstreamHeaders(
     h.set(k, v);
   }
   if (!h.has("anthropic-version")) h.set("anthropic-version", "2023-06-01");
-  if (!h.has("user-agent")) h.set("user-agent", "claude-cli/1.0.117 (external, cli)");
+  if (!h.has("user-agent")) h.set("user-agent", "claude-cli/2.1.236 (external, cli)");
   // applyAuth may overwrite user-agent (subscriptions do, so Anthropic routes
   // as Claude Code subscription usage instead of paid extra usage).
   await account.applyAuth(h);
