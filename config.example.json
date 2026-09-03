@@ -1,0 +1,24 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "upstream": "https://api.anthropic.com",
+  "auth_token": null,
+  "inject_claude_code_identity": true,
+  "log_level": "info",
+  "claude": {
+    "subscriptions": [
+      {
+        "name": "personal",
+        "access_token": "sk-ant-oat01-REPLACE",
+        "refresh_token": "sk-ant-ort01-REPLACE",
+        "expires_at": 0
+      }
+    ],
+    "api_keys": [
+      {
+        "name": "prod",
+        "key": "sk-ant-api03-REPLACE"
+      }
+    ]
+  }
+}

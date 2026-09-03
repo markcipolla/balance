@@ -1,0 +1,21 @@
+{
+  "name": "balance",
+  "version": "0.1.0",
+  "description": "Anthropic Messages API proxy that pools multiple Claude Code OAuth subscriptions for opencode and other clients.",
+  "type": "module",
+  "bin": {
+    "balance": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts serve",
+    "dev": "bun --hot run src/index.ts serve",
+    "build": "bun build src/index.ts --compile --outfile dist/balance && ([ \"$(uname)\" = Darwin ] && (codesign --remove-signature dist/balance 2>/dev/null; codesign --sign - --force --deep dist/balance) || true)",
+    "build:all": "./scripts/build-all.sh",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  }
+}
