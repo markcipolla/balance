@@ -7,6 +7,7 @@ import { AccountPool } from "./pool";
 import { startServer } from "./server";
 import { setLogLevel, setLogSink, log } from "./log";
 import { shouldUseDashboard, startDashboard } from "./dashboard";
+import { setForwardedDumpPath } from "./forward";
 
 const VERSION = pkg.version;
 import {
@@ -34,10 +35,15 @@ async function runServe(args: string[]): Promise<never> {
   setLogLevel(cfg.log_level);
   const pool = new AccountPool(cfg.claude, configPath);
   const dumpPath = flag(args, "--dump-requests") ?? null;
+  const dumpForwardedPath = flag(args, "--dump-forwarded") ?? null;
   const server = startServer(cfg, pool, dumpPath ? resolve(dumpPath) : null);
 
   if (dumpPath) {
     log.warn("dump mode active — pool bypassed, every request forwarded verbatim + logged", { path: resolve(dumpPath) });
+  }
+  if (dumpForwardedPath) {
+    setForwardedDumpPath(resolve(dumpForwardedPath));
+    log.warn("forwarded-dump active — every upstream request logged post-transformation", { path: resolve(dumpForwardedPath) });
   }
 
   primeClaudeVersion();

@@ -430,6 +430,8 @@ usage:
                                                                --wire-opencode installs opencode config first
                                                                --dump-requests bypass pool, forward every request as-is,
                                                                                log both directions to <path> as JSONL (debug only)
+                                                               --dump-forwarded like --dump-requests but keeps normal pool routing
+                                                                               and logs the transformed OUTGOING request per attempt
   balance init    [<config-path>]                              create an empty config.json
   balance status  [--config <path>]                            live pool status (queries running server)
 

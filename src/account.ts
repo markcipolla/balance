@@ -115,24 +115,32 @@ abstract class BaseAccount implements Common {
       const n = num(h);
       return n == null ? null : n * 1000;
     };
-    this.ratelimit.unified.status = headers.get("anthropic-ratelimit-unified-status");
-    this.ratelimit.unified.representative_claim = headers.get("anthropic-ratelimit-unified-representative-claim");
-    this.ratelimit.unified.overage_status = headers.get("anthropic-ratelimit-unified-overage-status");
-    this.ratelimit.unified.overage_disabled_reason = headers.get("anthropic-ratelimit-unified-overage-disabled-reason");
-    this.ratelimit.unified.five_hour = {
-      utilization: num("anthropic-ratelimit-unified-5h-utilization"),
-      reset_at: epochSec("anthropic-ratelimit-unified-5h-reset"),
-      status: headers.get("anthropic-ratelimit-unified-5h-status"),
+    // Only overwrite when the new value is non-null. Error responses (400/
+    // 429) don't include the unified headers, and a naive assign would wipe
+    // the good data we captured from the last successful response.
+    const keepStr = (h: string, prev: string | null) => headers.get(h) ?? prev;
+    const keepNum = (h: string, prev: number | null) => num(h) ?? prev;
+    const keepEpoch = (h: string, prev: number | null) => epochSec(h) ?? prev;
+
+    const u = this.ratelimit.unified;
+    u.status = keepStr("anthropic-ratelimit-unified-status", u.status);
+    u.representative_claim = keepStr("anthropic-ratelimit-unified-representative-claim", u.representative_claim);
+    u.overage_status = keepStr("anthropic-ratelimit-unified-overage-status", u.overage_status);
+    u.overage_disabled_reason = keepStr("anthropic-ratelimit-unified-overage-disabled-reason", u.overage_disabled_reason);
+    u.five_hour = {
+      utilization: keepNum("anthropic-ratelimit-unified-5h-utilization", u.five_hour.utilization),
+      reset_at: keepEpoch("anthropic-ratelimit-unified-5h-reset", u.five_hour.reset_at),
+      status: keepStr("anthropic-ratelimit-unified-5h-status", u.five_hour.status),
     };
-    this.ratelimit.unified.seven_day = {
-      utilization: num("anthropic-ratelimit-unified-7d-utilization"),
-      reset_at: epochSec("anthropic-ratelimit-unified-7d-reset"),
-      status: headers.get("anthropic-ratelimit-unified-7d-status"),
+    u.seven_day = {
+      utilization: keepNum("anthropic-ratelimit-unified-7d-utilization", u.seven_day.utilization),
+      reset_at: keepEpoch("anthropic-ratelimit-unified-7d-reset", u.seven_day.reset_at),
+      status: keepStr("anthropic-ratelimit-unified-7d-status", u.seven_day.status),
     };
-    this.ratelimit.unified.seven_day_opus = {
-      utilization: num("anthropic-ratelimit-unified-7d_oi-utilization"),
-      reset_at: epochSec("anthropic-ratelimit-unified-7d_oi-reset"),
-      status: headers.get("anthropic-ratelimit-unified-7d_oi-status"),
+    u.seven_day_opus = {
+      utilization: keepNum("anthropic-ratelimit-unified-7d_oi-utilization", u.seven_day_opus.utilization),
+      reset_at: keepEpoch("anthropic-ratelimit-unified-7d_oi-reset", u.seven_day_opus.reset_at),
+      status: keepStr("anthropic-ratelimit-unified-7d_oi-status", u.seven_day_opus.status),
     };
   }
 

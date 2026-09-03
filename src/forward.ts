@@ -3,7 +3,15 @@ import type { AccountPool } from "./pool";
 import type { AttemptResult, Config } from "./types";
 import { injectClaudeCodeIdentity } from "./transform";
 import { getClaudeVersion } from "./claude-version";
+import { dumpForwarded } from "./dump";
 import { log } from "./log";
+
+// Set by index.ts when serve is started with --dump-forwarded. Every attempt
+// logs its transformed outgoing request to this file.
+let forwardedDumpPath: string | null = null;
+export function setForwardedDumpPath(p: string | null): void {
+  forwardedDumpPath = p;
+}
 
 // Headers we always drop from the incoming request before forwarding: hop-by-hop
 // per RFC 7230, plus client-auth headers that our proxy replaces per-account.
@@ -129,6 +137,10 @@ async function attempt(
 ): Promise<AttemptResult> {
   const forwardHeaders = await buildUpstreamHeaders(headers, account);
   const url = new URL(upstreamPath, cfg.upstream).toString();
+
+  if (forwardedDumpPath) {
+    await dumpForwarded(forwardedDumpPath, account.name, method, url, forwardHeaders, body);
+  }
 
   account.begin();
   try {

@@ -73,6 +73,27 @@ export async function dumpResponse(
   });
 }
 
+// Log the request balance is about to send upstream, AFTER all transformations
+// (billing header injection, identity injection, auth swap, header spoofing).
+// Used by `--dump-forwarded` so you can see exactly what Anthropic receives.
+export async function dumpForwarded(
+  path: string,
+  account: string,
+  method: string,
+  url: string,
+  headers: Headers,
+  body: string | null,
+): Promise<void> {
+  await append(path, {
+    ts: new Date().toISOString(),
+    direction: "request",
+    method,
+    path: `[forwarded via ${account}] ${url}`,
+    headers: redactHeaders(headers),
+    body: body ?? undefined,
+  });
+}
+
 // A truly transparent proxy for use in --dump-requests mode: no auth swap,
 // no path canonicalization, no identity-prompt injection. Forwards the raw
 // request to upstream, dumps both directions, returns whatever came back.
