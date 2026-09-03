@@ -76,9 +76,13 @@ function extractWindow(node: unknown): UsageWindow {
   if (!node || typeof node !== "object") return { utilization: null, resets_at: null, status: null };
   const n = node as Record<string, unknown>;
   const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  // The API returns utilization as a percentage (0-100), not a ratio (0-1).
+  // Normalize to 0-1 so the renderer's `Math.round(v * 100)` produces the
+  // right number. Values that happen to already be ≤1 are treated as ratios
+  // (rare, but safe).
+  const asRatio = (v: number | null): number | null => (v == null ? null : v > 1 ? v / 100 : v);
   const isoOrEpoch = (v: unknown): number | null => {
     if (typeof v === "number" && Number.isFinite(v)) {
-      // Heuristic: seconds vs ms — anything under 10^12 is seconds.
       return v < 1e12 ? v * 1000 : v;
     }
     if (typeof v === "string") {
@@ -88,7 +92,7 @@ function extractWindow(node: unknown): UsageWindow {
     return null;
   };
   return {
-    utilization: num(n.utilization) ?? num(n.utilization_pct) ?? num(n.used_ratio) ?? num(n.used) ?? null,
+    utilization: asRatio(num(n.utilization) ?? num(n.utilization_pct) ?? num(n.used_ratio) ?? num(n.used) ?? null),
     resets_at: isoOrEpoch(n.resets_at) ?? isoOrEpoch(n.reset_at) ?? isoOrEpoch(n.reset) ?? isoOrEpoch(n.window_end) ?? null,
     status: typeof n.status === "string" ? n.status : null,
   };
