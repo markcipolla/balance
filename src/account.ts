@@ -174,11 +174,18 @@ export class SubscriptionAccount extends BaseAccount {
   async applyAuth(headers: Headers): Promise<void> {
     const t = await this.token();
     headers.set("authorization", `Bearer ${t}`);
-    // OAuth-authenticated Messages requests require this beta header.
+    // OAuth-authenticated Messages requests need this beta header to enable
+    // the OAuth code path at all.
     const existing = headers.get("anthropic-beta");
     const parts = new Set<string>(["oauth-2025-04-20"]);
     if (existing) for (const p of existing.split(",")) { const t = p.trim(); if (t) parts.add(t); }
     headers.set("anthropic-beta", Array.from(parts).join(","));
+    // For Anthropic to route these requests as subscription-metered (as
+    // opposed to falling into the org's extra-usage / API-billed tier), the
+    // request has to look like it's coming from the Claude Code CLI. Overwrite
+    // the client's user-agent + set the CLI's x-app marker.
+    headers.set("user-agent", "claude-cli/1.0.117 (external, cli)");
+    headers.set("x-app", "cli");
   }
 }
 

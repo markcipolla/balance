@@ -1,6 +1,6 @@
 {
   "name": "balance",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Anthropic Messages API proxy that pools multiple Claude Code OAuth subscriptions for opencode and other clients.",
   "type": "module",
   "bin": {
