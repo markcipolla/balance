@@ -1,152 +1,29 @@
 #!/usr/bin/env bun
-import { resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
-import { envOverride, loadConfig } from "./config";
-import { defaultConfigPath } from "./paths";
-import { AccountPool } from "./pool";
-import { startServer } from "./server";
-import { setLogLevel, setLogSink, log } from "./log";
-import { shouldUseDashboard, startDashboard } from "./dashboard";
-import { setForwardedDumpPath } from "./forward";
-
-const VERSION = pkg.version;
+import { setLogLevel } from "./log";
 import {
   flag,
-  runApiAdd,
-  runApiList,
-  runApiRemove,
-  runFlatList,
-  runFlatRemove,
-  runInit,
-  runOpencodeInstall,
-  runSubscriptionAdd,
-  runSubscriptionImport,
-  runSubscriptionList,
-  runSubscriptionRemove,
+  runAccountAdd,
+  runAccountList,
+  runAccountRemove,
+  runAccountSwitch,
+  runRun,
   usage,
 } from "./cli";
-import { findExistingOpencodeConfig, opencodeGlobalPath, wireOpencode } from "./opencode";
-import { primeClaudeVersion } from "./claude-version";
 
-async function runServe(args: string[]): Promise<never> {
-  const configPath = resolve(flag(args, "--config") ?? defaultConfigPath());
-  const raw = await loadConfig(configPath);
-  const cfg = envOverride(raw);
-  setLogLevel(cfg.log_level);
-  const pool = new AccountPool(cfg.claude, configPath);
-  const dumpPath = flag(args, "--dump-requests") ?? null;
-  const dumpForwardedPath = flag(args, "--dump-forwarded") ?? null;
-  const server = startServer(cfg, pool, dumpPath ? resolve(dumpPath) : null);
-
-  if (dumpPath) {
-    log.warn("dump mode active — pool bypassed, every request forwarded verbatim + logged", { path: resolve(dumpPath) });
-  }
-  if (dumpForwardedPath) {
-    setForwardedDumpPath(resolve(dumpForwardedPath));
-    log.warn("forwarded-dump active — every upstream request logged post-transformation", { path: resolve(dumpForwardedPath) });
-  }
-
-  primeClaudeVersion();
-  await maybeWireOpencode(cfg, args);
-
-  const wantTui = !args.includes("--no-tui") && shouldUseDashboard();
-  const dashboard = wantTui ? (setLogSink("buffer", 200), startDashboard(pool, cfg)) : null;
-
-  return new Promise<never>((_resolve, _reject) => {
-    const shutdown = (signal: string) => {
-      dashboard?.stop();
-      setLogSink("console");
-      log.info("shutting down", { signal });
-      server.stop(true);
-      process.exit(0);
-    };
-    process.on("SIGINT", () => shutdown("SIGINT"));
-    process.on("SIGTERM", () => shutdown("SIGTERM"));
-  });
-}
-
-// If --wire-opencode is passed, install/update the opencode config to point at
-// this server. Otherwise, if opencode has a config on disk but it doesn't
-// point at us yet, print a one-line hint so the user knows they can wire it.
-async function maybeWireOpencode(
-  cfg: { host: string; port: number; auth_token: string | null },
-  args: string[],
-): Promise<void> {
-  // opencode's Anthropic provider treats baseURL as already ending in /v1.
-  const baseURL = `http://${cfg.host}:${cfg.port}/v1`;
-  const apiKey = cfg.auth_token ?? "any-value";
-
-  if (args.includes("--wire-opencode")) {
-    const path = args.includes("--project")
-      ? resolve("opencode.jsonc")
-      : opencodeGlobalPath();
-    try {
-      const result = await wireOpencode({ path, baseURL, apiKey });
-      log.info("opencode wired", { path: result.path, action: result.action });
-    } catch (err) {
-      log.warn("opencode wire failed", { err: String(err) });
-    }
-    return;
-  }
-
-  const existing = findExistingOpencodeConfig();
-  if (!existing) return;
-  try {
-    const raw = await Bun.file(existing).text();
-    if (raw.includes(baseURL)) return;   // already wired; nothing to say
-    log.info("hint: opencode config detected but not pointed at balance", {
-      path: existing,
-      fix: "balance opencode install",
-    });
-  } catch {
-    // best-effort hint; ignore read failures
-  }
-}
-
-async function runStatus(args: string[]): Promise<number> {
-  const configPath = resolve(flag(args, "--config") ?? defaultConfigPath());
-  const cfg = envOverride(await loadConfig(configPath));
-  const url = `http://${cfg.host}:${cfg.port}/status`;
-  const headers: Record<string, string> = {};
-  if (cfg.auth_token) headers["authorization"] = `Bearer ${cfg.auth_token}`;
-  const res = await fetch(url, { headers });
-  const text = await res.text();
-  process.stdout.write(text);
-  if (!text.endsWith("\n")) process.stdout.write("\n");
-  return res.ok ? 0 : 1;
-}
+const VERSION = pkg.version;
 
 type Handler = (args: string[]) => Promise<number>;
 type Node = Handler | { [k: string]: Node };
 
-const CLAUDE_TREE: Node = {
-  subscription: {
-    list: runSubscriptionList,
-    ls: runSubscriptionList,
-    add: runSubscriptionAdd,
-    import: runSubscriptionImport,
-    remove: runSubscriptionRemove,
-    rm: runSubscriptionRemove,
-  },
-  subscriptions: {
-    list: runSubscriptionList,
-  },
-  api: {
-    list: runApiList,
-    ls: runApiList,
-    add: runApiAdd,
-    remove: runApiRemove,
-    rm: runApiRemove,
-  },
-  "api-keys": {
-    list: runApiList,
-  },
-};
-
-const OPENCODE_TREE: Node = {
-  install: runOpencodeInstall,
-  wire: runOpencodeInstall,
-  print: (args) => runOpencodeInstall([...args, "--print"]),
+const ACCOUNT_TREE: Node = {
+  add: runAccountAdd,
+  list: runAccountList,
+  ls: runAccountList,
+  remove: runAccountRemove,
+  rm: runAccountRemove,
+  switch: runAccountSwitch,
+  use: runAccountSwitch,
 };
 
 async function walk(node: Node, path: string[], args: string[]): Promise<number> {
@@ -167,45 +44,44 @@ async function walk(node: Node, path: string[], args: string[]): Promise<number>
 }
 
 async function main(): Promise<void> {
-  const [cmd, ...rest] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  const level = process.env.BALANCE_LOG_LEVEL;
+  if (level === "debug" || level === "info" || level === "warn" || level === "error") {
+    setLogLevel(level);
+  }
+
+  const [cmd, ...rest] = argv;
+
   try {
     switch (cmd) {
-      case "serve":
       case undefined:
-        await runServe(rest);
+        // Bare `balance` — pick an account and launch Claude Code.
+        await runRun(rest);
         return;
 
-      case "init":
-        process.exit(await runInit(rest));
+      case "run":
+        await runRun(rest);
         return;
 
-      case "status":
-        process.exit(await runStatus(rest));
+      case "account":
+        process.exit(await walk(ACCOUNT_TREE, ["account"], rest));
         return;
 
-      case "claude":
-        process.exit(await walk(CLAUDE_TREE, ["claude"], rest));
-        return;
-
-      case "opencode":
-        process.exit(await walk(OPENCODE_TREE, ["opencode"], rest));
-        return;
-
-      // Flat aliases for convenience.
+      // Flat aliases matching the old (v0.x) CLI surface.
       case "login":
-        process.exit(await runSubscriptionAdd(rest));
+        process.exit(await runAccountAdd(rest));
         return;
       case "list":
       case "ls":
-        process.exit(await runFlatList(rest));
-        return;
-      case "add":
-      case "import":
-        process.exit(await runSubscriptionImport(rest));
+        process.exit(await runAccountList(rest));
         return;
       case "remove":
       case "rm":
-        process.exit(await runFlatRemove(rest));
+        process.exit(await runAccountRemove(rest));
+        return;
+      case "switch":
+      case "use":
+        process.exit(await runAccountSwitch(rest));
         return;
 
       case "help":
@@ -222,6 +98,22 @@ async function main(): Promise<void> {
         process.exit(0);
         return;
 
+      // Deprecated: proxy-era commands that no longer make sense. Fail fast
+      // with a clear message rather than pretending they still work.
+      case "serve":
+      case "status":
+      case "claude":
+      case "opencode":
+      case "init":
+      case "add":
+      case "import":
+        console.error(
+          `The '${cmd}' command was removed when balance pivoted from a proxy to a Claude Code launcher.\n` +
+          `Use 'balance account ${cmd === "add" || cmd === "import" ? "add" : "list"}' or run 'balance --help' for the current commands.`,
+        );
+        process.exit(2);
+        return;
+
       default:
         console.error(`Unknown command: ${cmd}\n`);
         process.stdout.write(usage());
@@ -232,5 +124,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 }
+
+// Handle the --config flag early so flag() picks it up (rest of argv is
+// preserved so subcommands can still see it).
+void flag; // keep import for future use
 
 await main();

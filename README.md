@@ -1,27 +1,25 @@
 # balance
 
-An Anthropic Messages API proxy that pools multiple Claude accounts (Claude Code / Max / Pro OAuth subscriptions *and* API keys) and farms requests across them. Any tool that talks to `api.anthropic.com` — opencode, Zed's Anthropic provider, custom scripts, the Anthropic SDK — can point at `balance` and get a pooled backend transparently.
+Pick a Claude account, launch Claude Code with it. Multiple Claude Code accounts on one machine, without `claude logout` / `claude login` gymnastics.
 
 ## What it does
 
-- Speaks the Anthropic Messages API (`POST /v1/messages`, streaming or not).
-- Holds a mixed pool of:
-  - **Subscriptions** — Claude Code OAuth (access + refresh token, auto-refreshed).
-  - **API keys** — `sk-ant-api03-...`.
-- Prefers subscriptions first (uses up sub quota before falling back to paid API-key quota), round-robins within each tier.
-- Watches `anthropic-ratelimit-*` and `retry-after` response headers. On 429 the account is parked on cooldown; the request retries on the next available account.
-- Short-circuits with a synthetic 429 (and `retry-after`) if every account is on cooldown — no wasted probes.
-- Injects the "You are Claude Code" system-prompt prefix that Anthropic's OAuth-auth path requires, so arbitrary clients Just Work.
-- Passes streaming SSE responses through unchanged.
+- Each **account** you add lives in its own isolated `CLAUDE_CONFIG_DIR` under `~/.balance/accounts/<name>/` — its own OAuth credentials, its own Claude Code sessions and settings.
+- `balance` (bare, no args) fetches live 5-hour and weekly utilization per account, shows a picker, launches Claude Code as whichever account you pick.
+- `balance run <name>` skips the picker.
+- `balance account add` runs the Claude OAuth flow and saves the resulting credentials into a new account dir. No `claude` install needed to add accounts.
+
+Balance is a *launcher*, not a proxy. It just sets `CLAUDE_CONFIG_DIR` and hands off to `claude`. Every request goes to the real, sanctioned Claude Code CLI — no request rewriting, no header spoofing, no compat surface to break.
 
 ## Requirements
 
-- Bun 1.1+
-- One or more Claude accounts (subscription or API key)
+- Bun 1.1+ (only for building from source; the released binary is standalone).
+- Claude Code installed on `PATH`: `npm install -g @anthropic-ai/claude-code`.
+- One or more Claude accounts.
 
 ## Install
 
-### Homebrew (once the first release ships)
+### Homebrew
 
 ```bash
 brew install markcipolla/tap/balance
@@ -31,179 +29,96 @@ brew install markcipolla/tap/balance
 
 ```bash
 bun install
-bun run build          # dist/balance — single native binary
-# or run without compiling:
-bun run src/index.ts serve
+bun run build         # dist/balance
 ```
 
-## Add accounts
+## First run
 
 ```bash
-bun run src/index.ts init                      # creates ./config.json
+balance account add --name work
+# Open the printed URL, sign in to the Claude account you want to add,
+# then paste the code back.
+
+balance account add --name personal    # …repeat per account
 ```
 
-### Subscriptions (OAuth)
-
-Run the OAuth flow directly — no Claude Code install needed:
+Then just:
 
 ```bash
-bun run src/index.ts claude subscription add --name work
-# Open this URL in a browser, sign in to the Claude account,
-# then paste the code (from the callback page).
-#
-#   https://claude.ai/oauth/authorize?...
-#
-# Paste code#state (or just code): _
+balance
 ```
 
-Repeat for each subscription. Flags:
-- `--name <name>` — label (defaults to email, then a timestamp).
-- `--no-browser` — just print the URL (useful over SSH).
-- `--config <path>` — target config (default `./config.json`).
+You'll see something like:
 
-If you already have Claude Code logged in and just want to lift those tokens:
+```
+Accounts:
 
-```bash
-# macOS Keychain
-security find-generic-password -s "Claude Code-credentials" -w \
-  | bun run src/index.ts claude subscription import - --name work
+ 1. work  <mark@labflow.ai>
+    5h  ██████▏░░░░░░░ 44% (3h)
+    7d  ██▊░░░░░░░░░░░ 20% (5d)
 
-# Or a JSON credentials file
-bun run src/index.ts claude subscription import ~/.claude/.credentials.json --name personal
+ 2. personal
+    5h  ░░░░░░░░░░░░░░ —
+    7d  ░░░░░░░░░░░░░░ —
+
+Pick account [1-2, default: 1 (work)]:
 ```
 
-### API keys
+Pick one, and Claude Code launches signed in as that account.
 
-```bash
-bun run src/index.ts claude api add sk-ant-api03-... --name prod
-bun run src/index.ts claude api add --name backup      # prompts for the key
+## Commands
+
+```
+balance                                       pick + launch
+balance run [<name>] [-- <claude args>...]   launch <name>; picker if omitted
+                                              args after -- forward to claude
+
+balance account add   [--name <n>] [--no-browser]   OAuth login, save as isolated account
+balance account list  [--usage]                     list accounts (add --usage for live 5h/7d)
+balance account switch <name>                       set default account
+balance account remove <name>                       delete an account (removes credentials)
+
+balance --help          full usage
+balance --version       print version
 ```
 
-### List / remove
+Aliases from the v0.x proxy era (`login`, `list`, `remove`, `switch`) still work.
 
-```bash
-bun run src/index.ts claude subscription list
-bun run src/index.ts claude api list
-bun run src/index.ts claude subscription remove work
-bun run src/index.ts claude api remove prod
-```
+## Config
 
-Or the flat aliases: `balance list`, `balance remove <name>`.
-
-## Run
-
-```bash
-bun run src/index.ts serve
-# balance listening url=http://127.0.0.1:8787 accounts=3
-```
-
-## Point clients at it
-
-### opencode
-
-Either export env vars in the shell you run `opencode` from:
-
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-export ANTHROPIC_API_KEY=any-value    # required by opencode; ignored by balance unless auth_token is set
-opencode
-```
-
-…or put it in `~/.config/opencode/opencode.jsonc` (or per-project `opencode.jsonc`):
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "anthropic": {
-      "options": {
-        "baseURL": "http://127.0.0.1:8787",
-        "apiKey": "any-value"
-      }
-    }
-  }
-}
-```
-
-If opencode has been OAuthed against Anthropic (`opencode auth login anthropic`), that OAuth token wins over these options — clear it first with `opencode auth logout anthropic`.
-
-### Anything else speaking the Anthropic API
-
-Same env vars work for the Anthropic SDK, Zed's Anthropic provider, Claude Code itself, custom scripts:
-
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-export ANTHROPIC_API_KEY=any-value
-```
-
-## Config reference
+`~/.balance/config.json`:
 
 ```json
 {
-  "host": "127.0.0.1",
-  "port": 8787,
-  "upstream": "https://api.anthropic.com",
-  "auth_token": null,
-  "inject_claude_code_identity": true,
+  "active": "work",
+  "claude_binary": "claude",
   "log_level": "info",
-  "claude": {
-    "subscriptions": [
-      {
-        "name": "work",
-        "access_token": "sk-ant-oat01-...",
-        "refresh_token": "sk-ant-ort01-...",
-        "expires_at": 1788000000000
-      }
-    ],
-    "api_keys": [
-      { "name": "prod", "key": "sk-ant-api03-..." }
-    ]
-  }
+  "accounts": [
+    { "name": "work", "email": "mark@labflow.ai", "last_used_at": 1788418333140, "added_at": 1788418275400 }
+  ]
 }
 ```
 
-- `auth_token` — if set, clients must send it as `Authorization: Bearer <token>` or `x-api-key: <token>`. Leave as `null` on trusted localhost.
-- `inject_claude_code_identity` — required for OAuth requests to succeed. Turn off only if your client already sends the "You are Claude Code" prefix.
-- Env overrides: `BALANCE_HOST`, `BALANCE_PORT`, `BALANCE_AUTH_TOKEN`, `BALANCE_LOG_LEVEL`.
+Each account's OAuth credentials live at `~/.balance/accounts/<name>/.credentials.json` (mode 0600), Claude Code's native format.
 
-A legacy top-level `accounts` array is auto-migrated into `claude.subscriptions` on load.
-
-## Endpoints
-
-- `POST /v1/messages` — proxied; streaming supported
-- `POST /v1/messages/count_tokens` — proxied
-- `GET  /v1/models` — static list; served locally so client model pickers work
-- `GET  /health` — liveness
-- `GET  /status` — per-account snapshot: kind, in-flight, cooldown, rate-limit remaining, expiry
-
-## Releasing
-
-Releases are cut by tag and shipped as prebuilt binaries via `markcipolla/homebrew-tap`.
-
-**One-time setup**
-1. Create a fine-grained PAT with `Contents: Read and write` on `markcipolla/homebrew-tap` (nothing else).
-2. In this repo → *Settings → Secrets and variables → Actions → New repository secret*: name `HOMEBREW_TAP_TOKEN`, value the PAT.
-
-**Cutting a release**
-```bash
-# Bump the version in package.json (must match the tag), then:
-git tag v0.2.0
-git push --tags
-```
-The `release` workflow will:
-1. Cross-compile four binaries: darwin arm64/amd64, linux arm64/amd64.
-2. Publish `balance_<version>_<os>_<arch>.tar.gz` to a new GitHub Release.
-3. Render `Formula/balance.rb` and push it to `markcipolla/homebrew-tap` on `main`.
-
-If `HOMEBREW_TAP_TOKEN` is missing the workflow still publishes the Release — it just skips the tap push (log line will point at how to add the token).
-
-**Testing the build locally**
-```bash
-bun run build:all      # produces dist/balance_<version>_<os>_<arch>.tar.gz + .sha256 for each
-```
+Env overrides:
+- `BALANCE_CLAUDE_BINARY` — path to the `claude` executable (default: `claude` on PATH).
+- `BALANCE_LOG_LEVEL` — `debug | info | warn | error`.
 
 ## Notes
 
-- Only pool accounts you own. Anthropic's ToS applies to whichever subscriptions/keys you use; balance is plumbing, not a workaround for account limits.
-- Token refresh writes updated tokens back to `config.json` atomically (temp file + rename). Keep the file mode restrictive: `chmod 600 config.json`.
-- Cooldown is derived from `retry-after` when present, then the `anthropic-ratelimit-*-reset` timestamps. A 401 parks the account briefly (30s) so a bad token doesn't hot-loop.
+- **Passing args to Claude Code**: `balance run work -- --model opus --print "hello"` — everything after `--` is forwarded verbatim.
+- **Team plans**: Claude Code itself works on Team subscriptions. Non-Claude-Code agents (opencode, aider, Cline, etc.) via HTTP proxies do *not* — Anthropic's classifier routes tool-bearing requests to workspace extra-usage on Team plans regardless of how the proxy authenticates. See [Meridian issue #516](https://github.com/rynfar/meridian/issues/516). balance sidesteps this entirely by launching Claude Code itself, which is on the sanctioned path.
+- **Not a proxy**: balance v0.x was an Anthropic-API-compatible proxy that tried to pool subscriptions for third-party clients. That approach is fundamentally blocked on Team plans and got dropped in v1.0.0. Migration from an old `config.json` is automatic on first run.
+
+## Releasing
+
+Releases ship as prebuilt binaries via `markcipolla/homebrew-tap`, tag-triggered.
+
+```bash
+git tag v1.0.0 && git push --tags
+```
+
+The workflow cross-compiles for darwin arm64/amd64 and linux arm64/amd64, publishes the release, and pushes a fresh `Formula/balance.rb` to the tap.
+
+Requires the `HOMEBREW_TAP_TOKEN` repo secret (fine-grained PAT with `Contents: Read and write` on `markcipolla/homebrew-tap`). Without it, the workflow still publishes the GitHub Release and skips the tap push with a warning.

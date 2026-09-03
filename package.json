@@ -1,7 +1,7 @@
 {
   "name": "balance",
-  "version": "0.5.2",
-  "description": "Anthropic Messages API proxy that pools multiple Claude Code OAuth subscriptions for opencode and other clients.",
+  "version": "1.0.0",
+  "description": "Pick a Claude account and launch Claude Code with it. Manages isolated CLAUDE_CONFIG_DIRs so one machine can hold multiple Claude Code accounts side-by-side.",
   "type": "module",
   "bin": {
     "balance": "./src/index.ts"
