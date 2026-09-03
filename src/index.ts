@@ -25,6 +25,7 @@ import {
   usage,
 } from "./cli";
 import { findExistingOpencodeConfig, opencodeGlobalPath, wireOpencode } from "./opencode";
+import { primeClaudeVersion } from "./claude-version";
 
 async function runServe(args: string[]): Promise<never> {
   const configPath = resolve(flag(args, "--config") ?? defaultConfigPath());
@@ -34,6 +35,7 @@ async function runServe(args: string[]): Promise<never> {
   const pool = new AccountPool(cfg.claude, configPath);
   const server = startServer(cfg, pool);
 
+  primeClaudeVersion();
   await maybeWireOpencode(cfg, args);
 
   const wantTui = !args.includes("--no-tui") && shouldUseDashboard();

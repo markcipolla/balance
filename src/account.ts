@@ -6,6 +6,7 @@ import type {
 } from "./types";
 import { refreshAccessToken } from "./oauth";
 import { persistSubscriptionUpdate } from "./config";
+import { getClaudeVersion } from "./claude-version";
 import { log } from "./log";
 
 // Refresh a few minutes before the token actually expires so we don't race with
@@ -184,8 +185,11 @@ export class SubscriptionAccount extends BaseAccount {
     const parts = new Set<string>(["oauth-2025-04-20", "claude-code-20250219"]);
     if (existing) for (const p of existing.split(",")) { const t = p.trim(); if (t) parts.add(t); }
     headers.set("anthropic-beta", Array.from(parts).join(","));
-    // Overwrite the client's identity — the classifier reads these.
-    headers.set("user-agent", "claude-cli/2.1.236 (external, cli)");
+    // Overwrite the client's identity — the classifier reads these. Version
+    // is fetched from npm at startup and cached; using the current Claude
+    // Code version keeps balance from drifting behind a Anthropic-side
+    // minimum. See src/claude-version.ts.
+    headers.set("user-agent", `claude-cli/${getClaudeVersion()} (external, cli)`);
     headers.set("x-app", "cli");
   }
 }

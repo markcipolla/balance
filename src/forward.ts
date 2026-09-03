@@ -2,6 +2,7 @@ import type { Account } from "./account";
 import type { AccountPool } from "./pool";
 import type { AttemptResult, Config } from "./types";
 import { injectClaudeCodeIdentity } from "./transform";
+import { getClaudeVersion } from "./claude-version";
 import { log } from "./log";
 
 // Headers we always drop from the incoming request before forwarding: hop-by-hop
@@ -32,7 +33,7 @@ async function buildUpstreamHeaders(
     h.set(k, v);
   }
   if (!h.has("anthropic-version")) h.set("anthropic-version", "2023-06-01");
-  if (!h.has("user-agent")) h.set("user-agent", "claude-cli/2.1.236 (external, cli)");
+  if (!h.has("user-agent")) h.set("user-agent", `claude-cli/${getClaudeVersion()} (external, cli)`);
   // applyAuth may overwrite user-agent (subscriptions do, so Anthropic routes
   // as Claude Code subscription usage instead of paid extra usage).
   await account.applyAuth(h);
