@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { platform } from "node:os";
-import type { SubscriptionConfig } from "./types";
+import type { ClaudeCredentials } from "./credentials";
 
 // Claude Code's OAuth client. Public — ships in the Claude Code binary.
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -48,8 +48,9 @@ async function prompt(question: string): Promise<string> {
 }
 
 export interface LoginResult {
-  account: SubscriptionConfig;
+  name: string;
   email: string | null;
+  credentials: ClaudeCredentials;
 }
 
 export async function runOAuthLogin(opts: {
@@ -129,12 +130,15 @@ export async function runOAuthLogin(opts: {
   const accountName = opts.name ?? email ?? `account-${Date.now()}`;
 
   return {
-    account: {
-      name: accountName,
-      access_token: body.access_token,
-      refresh_token: body.refresh_token,
-      expires_at: Date.now() + body.expires_in * 1000,
-    },
+    name: accountName,
     email,
+    credentials: {
+      claudeAiOauth: {
+        accessToken: body.access_token,
+        refreshToken: body.refresh_token,
+        expiresAt: Date.now() + body.expires_in * 1000,
+        scopes: SCOPES,
+      },
+    },
   };
 }
