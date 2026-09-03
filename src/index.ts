@@ -59,7 +59,8 @@ async function maybeWireOpencode(
   cfg: { host: string; port: number; auth_token: string | null },
   args: string[],
 ): Promise<void> {
-  const baseURL = `http://${cfg.host}:${cfg.port}`;
+  // opencode's Anthropic provider treats baseURL as already ending in /v1.
+  const baseURL = `http://${cfg.host}:${cfg.port}/v1`;
   const apiKey = cfg.auth_token ?? "any-value";
 
   if (args.includes("--wire-opencode")) {

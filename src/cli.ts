@@ -378,7 +378,10 @@ function opencodeSummary(result: WireResult, apiKey: string): string {
 
 export async function runOpencodeInstall(args: string[]): Promise<number> {
   const cfg = await loadConfig(configPathOf(args)).catch(() => null);
-  const baseURL = `http://${cfg?.host ?? "127.0.0.1"}:${cfg?.port ?? 8787}`;
+  // opencode's Anthropic provider treats baseURL as already ending in /v1
+  // (it POSTs to bare /messages, not /v1/messages). balance accepts both
+  // shapes, but writing the /v1-suffixed URL matches the SDK convention.
+  const baseURL = `http://${cfg?.host ?? "127.0.0.1"}:${cfg?.port ?? 8787}/v1`;
   const apiKey = cfg?.auth_token ?? "any-value";
   const path = opencodeTargetPath(args);
   const print = args.includes("--print") || args.includes("--dry-run");

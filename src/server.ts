@@ -7,6 +7,21 @@ import { log } from "./log";
 
 const PROXIED_PATH_PREFIXES = ["/v1/messages", "/v1/complete"];
 
+// Some Anthropic-compatible clients (opencode's Anthropic provider via
+// @ai-sdk/anthropic, for one) treat their `baseURL` as already ending in
+// `/v1` and post to bare `/messages`. Accept that shape and rewrite the
+// upstream path so both conventions Just Work.
+function canonicalizePath(pathname: string): string | null {
+  for (const p of PROXIED_PATH_PREFIXES) {
+    if (pathname === p || pathname.startsWith(p + "/")) return pathname;
+  }
+  for (const p of PROXIED_PATH_PREFIXES) {
+    const bare = p.slice(3); // strip leading "/v1"
+    if (pathname === bare || pathname.startsWith(bare + "/")) return "/v1" + pathname;
+  }
+  return null;
+}
+
 function unauthorized(): Response {
   return new Response(
     JSON.stringify({
@@ -76,7 +91,7 @@ function staticModels(): Response {
 }
 
 function isProxied(pathname: string): boolean {
-  return PROXIED_PATH_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + "/"));
+  return canonicalizePath(pathname) !== null;
 }
 
 export function startServer(cfg: Config, pool: AccountPool): BunServer {
@@ -99,12 +114,13 @@ export function startServer(cfg: Config, pool: AccountPool): BunServer {
         return statusJson(pool);
       }
 
-      if (url.pathname === "/v1/models" && req.method === "GET") {
+      if ((url.pathname === "/v1/models" || url.pathname === "/models") && req.method === "GET") {
         if (!checkAuth(cfg, req)) return unauthorized();
         return staticModels();
       }
 
-      if (!isProxied(url.pathname)) {
+      const canonical = canonicalizePath(url.pathname);
+      if (!canonical) {
         return new Response(
           JSON.stringify({ type: "error", error: { type: "not_found_error", message: `no route for ${url.pathname}` } }),
           { status: 404, headers: { "content-type": "application/json" } },
@@ -117,7 +133,7 @@ export function startServer(cfg: Config, pool: AccountPool): BunServer {
         ? null
         : await req.text();
 
-      const upstreamPath = url.pathname + url.search;
+      const upstreamPath = canonical + url.search;
       const { result, accountName, attempts } = await forwardWithPool(
         pool,
         cfg,
