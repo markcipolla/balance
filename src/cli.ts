@@ -195,7 +195,7 @@ export async function runRun(args: string[]): Promise<number> {
 
   const dir = accountDir(chosen.name);
   console.log(dim(`Launching Claude Code as "${chosen.name}" (${dir})`));
-  launchClaudeCode(dir, forwardedArgs, runtime.claude_binary);
+  await launchClaudeCode(dir, forwardedArgs, runtime.claude_binary);
   return 0; // never reached — launcher takes over the process
 }
 
