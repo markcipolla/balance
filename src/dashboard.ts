@@ -20,6 +20,12 @@ const REFRESH_MS = 400;
 const BAR_WIDTH = 14;
 const LOG_TAIL = 8;
 
+interface UnifiedWindow {
+  utilization: number | null;
+  reset_at: number | null;
+  status: string | null;
+}
+
 interface AccountSnapshot {
   name: string;
   kind: string;
@@ -33,6 +39,12 @@ interface AccountSnapshot {
     tokens_remaining: number | null;
     tokens_limit: number | null;
     last_error: string | null;
+    unified: {
+      status: string | null;
+      five_hour: UnifiedWindow;
+      seven_day: UnifiedWindow;
+      seven_day_opus: UnifiedWindow;
+    };
   };
 }
 
@@ -40,10 +52,10 @@ interface RenderRow {
   dot: string;
   name: string;
   kind: string;
-  reqBar: string;
-  reqText: string;
-  tokBar: string;
-  tokText: string;
+  leftBar: string;      // "5h" for subs, "req" for keys
+  leftText: string;
+  rightBar: string;     // "7d" for subs, "tok" for keys
+  rightText: string;
   status: string;
   used: string;
 }
@@ -92,19 +104,48 @@ function renderBar(remaining: number | null, limit: number | null): { chart: str
   };
 }
 
-function buildRows(pool: AccountPool): RenderRow[] {
+// Subscription bar: driven by the unified 5h/7d utilization (0..1). No
+// meaningful "remaining count" for subs — Anthropic doesn't send one — so the
+// label is percent + time to reset.
+function renderUnifiedBar(w: UnifiedWindow, now: number): { chart: string; label: string } {
+  if (w.utilization == null) {
+    return { chart: dim("░".repeat(BAR_WIDTH)), label: dim("no data yet") };
+  }
+  const chart = bar(w.utilization, 1, BAR_WIDTH);
+  const colored = w.utilization >= 0.9 ? red(chart) : w.utilization >= 0.7 ? yellow(chart) : green(chart);
+  const pct = `${Math.round(w.utilization * 100)}%`;
+  const resetIn = w.reset_at ? ` (${formatDuration(w.reset_at - now)})` : "";
+  return { chart: colored, label: `${pct}${resetIn}` };
+}
+
+function buildRows(pool: AccountPool, now: number): RenderRow[] {
   return pool.all().map((account) => {
     const s = account.snapshot() as unknown as AccountSnapshot;
+    if (s.kind === "subscription") {
+      const fiveH = renderUnifiedBar(s.ratelimit.unified.five_hour, now);
+      const week = renderUnifiedBar(s.ratelimit.unified.seven_day, now);
+      return {
+        dot: pickDot(s),
+        name: s.name,
+        kind: "sub",
+        leftBar: fiveH.chart,
+        leftText: fiveH.label,
+        rightBar: week.chart,
+        rightText: week.label,
+        status: statusText(s),
+        used: String(s.total_requests),
+      };
+    }
     const req = renderBar(s.ratelimit.requests_remaining, s.ratelimit.requests_limit);
     const tok = renderBar(s.ratelimit.tokens_remaining, s.ratelimit.tokens_limit);
     return {
       dot: pickDot(s),
       name: s.name,
-      kind: s.kind === "subscription" ? "sub" : "key",
-      reqBar: req.chart,
-      reqText: req.label,
-      tokBar: tok.chart,
-      tokText: tok.label,
+      kind: "key",
+      leftBar: req.chart,
+      leftText: req.label,
+      rightBar: tok.chart,
+      rightText: tok.label,
       status: statusText(s),
       used: String(s.total_requests),
     };
@@ -124,10 +165,12 @@ function visibleLen(s: string): number {
 }
 
 export function renderFrame(pool: AccountPool, cfg: Config, startedAt: number): string {
-  const rows = buildRows(pool);
-  const width = ttyWidth();
   const now = Date.now();
+  const rows = buildRows(pool, now);
+  const width = ttyWidth();
   const uptime = formatDuration(now - startedAt);
+  const anySubs = pool.all().some((a) => a.snapshot().kind === "subscription");
+  const anyKeys = pool.all().some((a) => a.snapshot().kind === "api_key");
 
   const header = [
     bold("balance"),
@@ -148,15 +191,18 @@ export function renderFrame(pool: AccountPool, cfg: Config, startedAt: number): 
   } else {
     const nameW = Math.max(4, ...rows.map((r) => r.name.length));
     const kindW = Math.max(4, ...rows.map((r) => r.kind.length));
-    const reqTextW = Math.max(8, ...rows.map((r) => visibleLen(r.reqText)));
-    const tokTextW = Math.max(8, ...rows.map((r) => visibleLen(r.tokText)));
+    const leftTextW = Math.max(8, ...rows.map((r) => visibleLen(r.leftText)));
+    const rightTextW = Math.max(8, ...rows.map((r) => visibleLen(r.rightText)));
     const statusW = Math.max(6, ...rows.map((r) => visibleLen(r.status)));
 
-    // Column header
+    // Column header — pick labels that fit whichever account types are in the
+    // pool. Mixed pool gets subscription-style labels since those matter more.
+    const leftLabel = anySubs ? "5H WINDOW" : "REQUESTS";
+    const rightLabel = anySubs ? (anyKeys ? "7D WINDOW / TOKENS" : "7D WINDOW") : "TOKENS";
     const colHead = "  " + dim(padRight("NAME", nameW))
       + "  " + dim(padRight("KIND", kindW))
-      + "  " + dim(padRight("REQUESTS", BAR_WIDTH + 2 + reqTextW))
-      + "  " + dim(padRight("TOKENS", BAR_WIDTH + 2 + tokTextW))
+      + "  " + dim(padRight(leftLabel, BAR_WIDTH + 2 + leftTextW))
+      + "  " + dim(padRight(rightLabel, BAR_WIDTH + 2 + rightTextW))
       + "  " + dim(padRight("STATUS", statusW))
       + "  " + dim("USED");
     lines.push(colHead);
@@ -164,8 +210,8 @@ export function renderFrame(pool: AccountPool, cfg: Config, startedAt: number): 
     for (const r of rows) {
       lines.push(
         `${r.dot} ${padRight(r.name, nameW)}  ${dim(padRight(r.kind, kindW))}  `
-          + `${r.reqBar} ${padRight(r.reqText, reqTextW)}  `
-          + `${r.tokBar} ${padRight(r.tokText, tokTextW)}  `
+          + `${r.leftBar} ${padRight(r.leftText, leftTextW)}  `
+          + `${r.rightBar} ${padRight(r.rightText, rightTextW)}  `
           + `${padRight(r.status, statusW)}  `
           + `${dim(r.used)}`,
       );

@@ -161,7 +161,14 @@ export function startServer(cfg: Config, pool: AccountPool, dumpPath: string | n
         ? null
         : await req.text();
 
-      const upstreamPath = canonical + url.search;
+      // Claude Code hits /v1/messages?beta=true. Add it if the downstream
+      // client didn't — Anthropic uses this to gate beta feature handling.
+      const search = new URLSearchParams(url.search);
+      if (canonical.startsWith("/v1/messages") && !search.has("beta")) {
+        search.set("beta", "true");
+      }
+      const qs = search.toString();
+      const upstreamPath = qs ? `${canonical}?${qs}` : canonical;
       const { result, accountName, attempts } = await forwardWithPool(
         pool,
         cfg,

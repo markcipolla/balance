@@ -34,6 +34,15 @@ abstract class BaseAccount implements Common {
     tokens_reset_at: null,
     cooldown_until: null,
     last_error: null,
+    unified: {
+      status: null,
+      representative_claim: null,
+      five_hour: { utilization: null, reset_at: null, status: null },
+      seven_day: { utilization: null, reset_at: null, status: null },
+      seven_day_opus: { utilization: null, reset_at: null, status: null },
+      overage_status: null,
+      overage_disabled_reason: null,
+    },
     raw: {},
   };
 
@@ -85,13 +94,46 @@ abstract class BaseAccount implements Common {
     this.ratelimit.tokens_reset_at = readIso("anthropic-ratelimit-tokens-reset");
 
     // Capture every anthropic-ratelimit-* header verbatim so subscription
-    // usage windows (5-hour, weekly) and any newly-added unified limits
-    // surface without balance needing to know their exact names.
+    // usage windows and any newly-added unified limits surface without
+    // balance needing to know their exact names.
     const raw: Record<string, string> = {};
     for (const [k, v] of headers.entries()) {
       if (k.toLowerCase().startsWith("anthropic-ratelimit-")) raw[k.toLowerCase()] = v;
     }
     this.ratelimit.raw = raw;
+
+    // Named fields for the unified subscription-window headers. OAuth
+    // responses use these; the plain requests/tokens headers above are
+    // API-tier only.
+    const num = (h: string): number | null => {
+      const v = headers.get(h);
+      if (v == null) return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const epochSec = (h: string): number | null => {
+      const n = num(h);
+      return n == null ? null : n * 1000;
+    };
+    this.ratelimit.unified.status = headers.get("anthropic-ratelimit-unified-status");
+    this.ratelimit.unified.representative_claim = headers.get("anthropic-ratelimit-unified-representative-claim");
+    this.ratelimit.unified.overage_status = headers.get("anthropic-ratelimit-unified-overage-status");
+    this.ratelimit.unified.overage_disabled_reason = headers.get("anthropic-ratelimit-unified-overage-disabled-reason");
+    this.ratelimit.unified.five_hour = {
+      utilization: num("anthropic-ratelimit-unified-5h-utilization"),
+      reset_at: epochSec("anthropic-ratelimit-unified-5h-reset"),
+      status: headers.get("anthropic-ratelimit-unified-5h-status"),
+    };
+    this.ratelimit.unified.seven_day = {
+      utilization: num("anthropic-ratelimit-unified-7d-utilization"),
+      reset_at: epochSec("anthropic-ratelimit-unified-7d-reset"),
+      status: headers.get("anthropic-ratelimit-unified-7d-status"),
+    };
+    this.ratelimit.unified.seven_day_opus = {
+      utilization: num("anthropic-ratelimit-unified-7d_oi-utilization"),
+      reset_at: epochSec("anthropic-ratelimit-unified-7d_oi-reset"),
+      status: headers.get("anthropic-ratelimit-unified-7d_oi-status"),
+    };
   }
 
   markLimited(seconds: number, reason: string): void {
@@ -175,24 +217,48 @@ export class SubscriptionAccount extends BaseAccount {
   async applyAuth(headers: Headers): Promise<void> {
     const t = await this.token();
     headers.set("authorization", `Bearer ${t}`);
-    // Anthropic classifies OAuth requests as subscription-metered vs extra-
-    // usage / API-billed based on how much the request looks like Claude
-    // Code. `oauth-*` enables OAuth Bearer at all; `claude-code-*` identifies
-    // the caller as Claude Code specifically so requests bill against
-    // included subscription quota. Preserve any extra betas the downstream
-    // client passed through (opencode, SDKs) so their feature flags stay on.
+    // Full Claude Code beta set — captured from a real Claude Code request via
+    // `balance serve --dump-requests`. Anthropic's classifier requires the
+    // caller to identify as Claude Code across MULTIPLE signals (headers +
+    // body billing block) to route as subscription-metered. Downstream client
+    // betas are preserved on top.
     const existing = headers.get("anthropic-beta");
-    const parts = new Set<string>(["oauth-2025-04-20", "claude-code-20250219"]);
+    const parts = new Set<string>(CLAUDE_CODE_BETAS);
     if (existing) for (const p of existing.split(",")) { const t = p.trim(); if (t) parts.add(t); }
     headers.set("anthropic-beta", Array.from(parts).join(","));
-    // Overwrite the client's identity — the classifier reads these. Version
-    // is fetched from npm at startup and cached; using the current Claude
-    // Code version keeps balance from drifting behind a Anthropic-side
-    // minimum. See src/claude-version.ts.
+    // Header-level identity signals.
     headers.set("user-agent", `claude-cli/${getClaudeVersion()} (external, cli)`);
     headers.set("x-app", "cli");
+    headers.set("anthropic-dangerous-direct-browser-access", "true");
+    // x-stainless-* is the Anthropic SDK's runtime fingerprint. Values here
+    // match the ones a real Claude Code build sends; SDK version tracks the
+    // published @anthropic-ai/sdk pin inside Claude Code.
+    headers.set("x-stainless-arch", "arm64");
+    headers.set("x-stainless-lang", "js");
+    headers.set("x-stainless-os", "MacOS");
+    headers.set("x-stainless-package-version", "0.112.1");
+    headers.set("x-stainless-retry-count", "0");
+    headers.set("x-stainless-runtime", "node");
+    headers.set("x-stainless-runtime-version", "v26.3.0");
+    headers.set("x-stainless-timeout", "600");
   }
 }
+
+const CLAUDE_CODE_BETAS = [
+  "claude-code-20250219",
+  "oauth-2025-04-20",
+  "interleaved-thinking-2025-05-14",
+  "redact-thinking-2026-02-12",
+  "thinking-token-count-2026-05-13",
+  "context-management-2025-06-27",
+  "prompt-caching-scope-2026-01-05",
+  "mid-conversation-system-2026-04-07",
+  "advisor-tool-2026-03-01",
+  "effort-2025-11-24",
+  "fallback-credit-2026-06-01",
+  "afk-mode-2026-01-31",
+  "extended-cache-ttl-2025-04-11",
+];
 
 export class ApiKeyAccount extends BaseAccount {
   override readonly kind = "api_key" as const;

@@ -35,6 +35,12 @@ export interface LegacyConfigShape {
 
 export type AccountKind = "subscription" | "api_key";
 
+export interface UnifiedWindow {
+  utilization: number | null;   // 0.0..1.0
+  reset_at: number | null;      // ms since epoch
+  status: string | null;        // "allowed" | "warning" | "rejected" | ...
+}
+
 export interface RateLimitState {
   requests_remaining: number | null;
   requests_limit: number | null;
@@ -44,11 +50,19 @@ export interface RateLimitState {
   tokens_reset_at: number | null;
   cooldown_until: number | null;
   last_error: string | null;
+  // Subscription usage from `anthropic-ratelimit-unified-*` response headers.
+  // OAuth Messages responses surface these; API-tier responses don't.
+  unified: {
+    status: string | null;              // overall
+    representative_claim: string | null;
+    five_hour: UnifiedWindow;
+    seven_day: UnifiedWindow;
+    seven_day_opus: UnifiedWindow;      // model-specific weekly window ("7d_oi")
+    overage_status: string | null;
+    overage_disabled_reason: string | null;
+  };
   // Every anthropic-ratelimit-* header the upstream last sent, verbatim.
-  // Anthropic surfaces subscription usage windows (5-hour / weekly on OAuth)
-  // and unified limits as headers whose exact names change over time — this is
-  // the escape hatch that lets `subscription list` render them without our
-  // code needing to know the specific names in advance.
+  // Escape hatch for windows we don't parse into named fields yet.
   raw: Record<string, string>;
 }
 

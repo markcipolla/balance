@@ -260,7 +260,7 @@ export async function forwardWithPool(
   if (isJson && rawBody && cfg.inject_claude_code_identity) {
     try {
       parsedBody = JSON.parse(rawBody) as Record<string, unknown>;
-      const transformed = injectClaudeCodeIdentity(parsedBody);
+      const transformed = injectClaudeCodeIdentity(parsedBody, getClaudeVersion());
       outgoing = JSON.stringify(transformed);
     } catch {
       // Not valid JSON despite the header — forward as-is.
