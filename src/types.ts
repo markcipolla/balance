@@ -42,6 +42,12 @@ export interface RateLimitState {
   tokens_reset_at: number | null;
   cooldown_until: number | null;
   last_error: string | null;
+  // Every anthropic-ratelimit-* header the upstream last sent, verbatim.
+  // Anthropic surfaces subscription usage windows (5-hour / weekly on OAuth)
+  // and unified limits as headers whose exact names change over time — this is
+  // the escape hatch that lets `subscription list` render them without our
+  // code needing to know the specific names in advance.
+  raw: Record<string, string>;
 }
 
 export interface AttemptResult {

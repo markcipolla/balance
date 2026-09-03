@@ -31,6 +31,7 @@ abstract class BaseAccount implements Common {
     tokens_reset_at: null,
     cooldown_until: null,
     last_error: null,
+    raw: {},
   };
 
   constructor(name: string) {
@@ -77,6 +78,15 @@ abstract class BaseAccount implements Common {
     this.ratelimit.requests_reset_at = readIso("anthropic-ratelimit-requests-reset");
     this.ratelimit.tokens_remaining = readInt("anthropic-ratelimit-tokens-remaining");
     this.ratelimit.tokens_reset_at = readIso("anthropic-ratelimit-tokens-reset");
+
+    // Capture every anthropic-ratelimit-* header verbatim so subscription
+    // usage windows (5-hour, weekly) and any newly-added unified limits
+    // surface without balance needing to know their exact names.
+    const raw: Record<string, string> = {};
+    for (const [k, v] of headers.entries()) {
+      if (k.toLowerCase().startsWith("anthropic-ratelimit-")) raw[k.toLowerCase()] = v;
+    }
+    this.ratelimit.raw = raw;
   }
 
   markLimited(seconds: number, reason: string): void {

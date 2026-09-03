@@ -11,6 +11,55 @@ import {
 } from "./config";
 import { defaultConfigPath } from "./paths";
 import { runOAuthLogin } from "./login";
+import { formatCount, formatDuration, renderTable } from "./format";
+import {
+  opencodeGlobalPath,
+  opencodeProjectPath,
+  wireOpencode,
+  type WireResult,
+} from "./opencode";
+
+interface LiveAccountSnapshot {
+  name: string;
+  kind: "subscription" | "api_key";
+  available: boolean;
+  in_flight: number;
+  total_requests: number;
+  cooldown_ms: number;
+  expires_in_ms?: number;
+  ratelimit: {
+    requests_remaining: number | null;
+    tokens_remaining: number | null;
+    raw: Record<string, string>;
+    last_error: string | null;
+  };
+}
+
+// Try to fetch live pool state from a running `balance serve`. Returns null
+// if the server isn't up (connection refused / any error) so list commands
+// can gracefully degrade to config-only output.
+async function fetchLiveSnapshots(cfg: Config): Promise<LiveAccountSnapshot[] | null> {
+  const url = `http://${cfg.host}:${cfg.port}/status`;
+  const headers: Record<string, string> = {};
+  if (cfg.auth_token) headers["authorization"] = `Bearer ${cfg.auth_token}`;
+  try {
+    const res = await fetch(url, {
+      headers,
+      signal: AbortSignal.timeout(500),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { accounts: LiveAccountSnapshot[] };
+    return body.accounts ?? [];
+  } catch {
+    return null;
+  }
+}
+
+function statusCell(s: LiveAccountSnapshot): string {
+  if (s.available) return s.in_flight > 0 ? `busy (${s.in_flight})` : "available";
+  const reason = s.ratelimit.last_error ?? "cooldown";
+  return `${reason} · ${formatDuration(s.cooldown_ms)}`;
+}
 
 interface ClaudeCredentialsFile {
   claudeAiOauth?: {
@@ -110,11 +159,61 @@ export async function runSubscriptionList(args: string[]): Promise<number> {
     console.log("No Claude subscriptions.");
     return 0;
   }
+  const live = await fetchLiveSnapshots(cfg);
   const now = Date.now();
   console.log(`Claude subscriptions (${subs.length}):`);
+
+  const byName: Map<string, LiveAccountSnapshot> = new Map(
+    (live ?? []).filter((s) => s.kind === "subscription").map((s) => [s.name, s]),
+  );
+
+  const header = ["NAME", "STATUS", "REQ LEFT", "TOK LEFT", "USED", "TOKEN EXP"];
+  const rows: string[][] = subs.map((s) => {
+    const l = byName.get(s.name);
+    const exp = s.expires_at ? formatDuration(s.expires_at - now) : "unknown";
+    if (!l) {
+      return [s.name, "not observed", "-", "-", "-", exp];
+    }
+    return [
+      s.name,
+      statusCell(l),
+      formatCount(l.ratelimit.requests_remaining),
+      formatCount(l.ratelimit.tokens_remaining),
+      String(l.total_requests),
+      exp,
+    ];
+  });
+  console.log(renderTable(header, rows));
+
+  // If Anthropic surfaced any other anthropic-ratelimit-* headers, print them
+  // beneath each account so subscription-window limits (5h/weekly) still show
+  // through even though we don't parse them into named columns.
+  const KNOWN = new Set([
+    "anthropic-ratelimit-requests-remaining",
+    "anthropic-ratelimit-requests-reset",
+    "anthropic-ratelimit-requests-limit",
+    "anthropic-ratelimit-tokens-remaining",
+    "anthropic-ratelimit-tokens-reset",
+    "anthropic-ratelimit-tokens-limit",
+  ]);
+  const extraLines: string[] = [];
   for (const s of subs) {
-    const exp = s.expires_at ? `expires in ${Math.round((s.expires_at - now) / 1000)}s` : "no expiry set";
-    console.log(`  - ${s.name.padEnd(24)} ${exp}`);
+    const l = byName.get(s.name);
+    if (!l) continue;
+    const extras = Object.entries(l.ratelimit.raw)
+      .filter(([k]) => !KNOWN.has(k))
+      .map(([k, v]) => `${k.replace(/^anthropic-ratelimit-/, "")}=${v}`);
+    if (extras.length) extraLines.push(`  ${s.name}: ${extras.join("  ")}`);
+  }
+  if (extraLines.length) {
+    console.log();
+    console.log("other rate-limit headers:");
+    for (const l of extraLines) console.log(l);
+  }
+
+  if (!live) {
+    console.log();
+    console.log(`(start \`balance serve\` to see live usage; polling http://${cfg.host}:${cfg.port}/status)`);
   }
   return 0;
 }
@@ -193,9 +292,31 @@ export async function runApiList(args: string[]): Promise<number> {
     console.log("No API keys.");
     return 0;
   }
+  const live = await fetchLiveSnapshots(cfg);
   console.log(`Claude API keys (${keys.length}):`);
-  for (const k of keys) {
-    console.log(`  - ${k.name.padEnd(24)} ${maskKey(k.key)}`);
+
+  const byName: Map<string, LiveAccountSnapshot> = new Map(
+    (live ?? []).filter((s) => s.kind === "api_key").map((s) => [s.name, s]),
+  );
+
+  const header = ["NAME", "KEY", "STATUS", "REQ LEFT", "TOK LEFT", "USED"];
+  const rows: string[][] = keys.map((k) => {
+    const l = byName.get(k.name);
+    if (!l) return [k.name, maskKey(k.key), "not observed", "-", "-", "-"];
+    return [
+      k.name,
+      maskKey(k.key),
+      statusCell(l),
+      formatCount(l.ratelimit.requests_remaining),
+      formatCount(l.ratelimit.tokens_remaining),
+      String(l.total_requests),
+    ];
+  });
+  console.log(renderTable(header, rows));
+
+  if (!live) {
+    console.log();
+    console.log(`(start \`balance serve\` to see live usage; polling http://${cfg.host}:${cfg.port}/status)`);
   }
   return 0;
 }
@@ -225,6 +346,56 @@ export async function runApiAdd(args: string[]): Promise<number> {
   return 0;
 }
 
+// ---------- opencode: install / print ----------
+
+function opencodeTargetPath(args: string[]): string {
+  if (args.includes("--project")) return opencodeProjectPath();
+  const explicit = flag(args, "--path");
+  if (explicit) return resolve(explicit);
+  return opencodeGlobalPath();
+}
+
+function opencodeSummary(result: WireResult, apiKey: string): string {
+  const lines: string[] = [];
+  const verb = {
+    created: "Created",
+    updated: "Updated",
+    "already-current": "Already current",
+    printed: "Would write",
+  }[result.action];
+  lines.push(`${verb}: ${result.path}`);
+  if (result.hadComments && result.action !== "already-current" && result.action !== "printed") {
+    lines.push("  note: file had comments (JSONC) — rewrote as plain JSON, comments dropped.");
+  }
+  if (apiKey === "any-value") {
+    lines.push("  provider.anthropic.options.apiKey = \"any-value\" (opencode requires it set; balance ignores unless auth_token is configured).");
+  }
+  lines.push("");
+  lines.push("if you've previously run `opencode auth login anthropic`, that OAuth token overrides");
+  lines.push("this config — clear it with: opencode auth logout anthropic");
+  return lines.join("\n");
+}
+
+export async function runOpencodeInstall(args: string[]): Promise<number> {
+  const cfg = await loadConfig(configPathOf(args)).catch(() => null);
+  const baseURL = `http://${cfg?.host ?? "127.0.0.1"}:${cfg?.port ?? 8787}`;
+  const apiKey = cfg?.auth_token ?? "any-value";
+  const path = opencodeTargetPath(args);
+  const print = args.includes("--print") || args.includes("--dry-run");
+  const force = args.includes("--force");
+
+  const result = await wireOpencode({ path, baseURL, apiKey, print, force });
+
+  if (print) {
+    console.log(JSON.stringify(result.after, null, 2));
+    console.log();
+  }
+  console.log(opencodeSummary(result, apiKey));
+  return 0;
+}
+
+// ---------- api remove ----------
+
 export async function runApiRemove(args: string[]): Promise<number> {
   const name = positional(args)[0];
   if (!name) {
@@ -250,7 +421,9 @@ export function usage(): string {
   return `balance — pool multiple Claude accounts behind an Anthropic-compatible endpoint
 
 usage:
-  balance serve   [--config <path>]                            start the proxy server
+  balance serve   [--config <path>] [--wire-opencode [--project]]
+                                                               start the proxy server
+                                                               --wire-opencode installs opencode config first
   balance init    [<config-path>]                              create an empty config.json
   balance status  [--config <path>]                            live pool status (queries running server)
 
@@ -262,6 +435,13 @@ usage:
   balance claude api list                                      list Claude API keys (masked)
   balance claude api add    [<key>|--key <key>] [--name <n>]   add an API key (prompts if omitted)
   balance claude api remove <name>                             remove an API key
+
+  balance opencode install  [--project] [--path <p>] [--print] [--force]
+                                                               point opencode at balance
+                                                               (default: global ~/.config/opencode/opencode.jsonc;
+                                                                --project writes ./opencode.jsonc,
+                                                                --print dry-runs, --force overwrites unparseable configs)
+  balance opencode print                                       alias for 'install --print'
 
 aliases (flat):
   balance login    → balance claude subscription add

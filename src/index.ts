@@ -16,12 +16,14 @@ import {
   runFlatList,
   runFlatRemove,
   runInit,
+  runOpencodeInstall,
   runSubscriptionAdd,
   runSubscriptionImport,
   runSubscriptionList,
   runSubscriptionRemove,
   usage,
 } from "./cli";
+import { findExistingOpencodeConfig, opencodeGlobalPath, wireOpencode } from "./opencode";
 
 async function runServe(args: string[]): Promise<never> {
   const configPath = resolve(flag(args, "--config") ?? defaultConfigPath());
@@ -30,6 +32,8 @@ async function runServe(args: string[]): Promise<never> {
   setLogLevel(cfg.log_level);
   const pool = new AccountPool(cfg.claude, configPath);
   const server = startServer(cfg, pool);
+
+  await maybeWireOpencode(cfg, args);
 
   return new Promise<never>((_resolve, _reject) => {
     const shutdown = (signal: string) => {
@@ -40,6 +44,43 @@ async function runServe(args: string[]): Promise<never> {
     process.on("SIGINT", () => shutdown("SIGINT"));
     process.on("SIGTERM", () => shutdown("SIGTERM"));
   });
+}
+
+// If --wire-opencode is passed, install/update the opencode config to point at
+// this server. Otherwise, if opencode has a config on disk but it doesn't
+// point at us yet, print a one-line hint so the user knows they can wire it.
+async function maybeWireOpencode(
+  cfg: { host: string; port: number; auth_token: string | null },
+  args: string[],
+): Promise<void> {
+  const baseURL = `http://${cfg.host}:${cfg.port}`;
+  const apiKey = cfg.auth_token ?? "any-value";
+
+  if (args.includes("--wire-opencode")) {
+    const path = args.includes("--project")
+      ? resolve("opencode.jsonc")
+      : opencodeGlobalPath();
+    try {
+      const result = await wireOpencode({ path, baseURL, apiKey });
+      log.info("opencode wired", { path: result.path, action: result.action });
+    } catch (err) {
+      log.warn("opencode wire failed", { err: String(err) });
+    }
+    return;
+  }
+
+  const existing = findExistingOpencodeConfig();
+  if (!existing) return;
+  try {
+    const raw = await Bun.file(existing).text();
+    if (raw.includes(baseURL)) return;   // already wired; nothing to say
+    log.info("hint: opencode config detected but not pointed at balance", {
+      path: existing,
+      fix: "balance opencode install",
+    });
+  } catch {
+    // best-effort hint; ignore read failures
+  }
 }
 
 async function runStatus(args: string[]): Promise<number> {
@@ -82,6 +123,12 @@ const CLAUDE_TREE: Node = {
   },
 };
 
+const OPENCODE_TREE: Node = {
+  install: runOpencodeInstall,
+  wire: runOpencodeInstall,
+  print: (args) => runOpencodeInstall([...args, "--print"]),
+};
+
 async function walk(node: Node, path: string[], args: string[]): Promise<number> {
   if (typeof node === "function") return node(args);
   const [head, ...rest] = args;
@@ -118,6 +165,10 @@ async function main(): Promise<void> {
 
       case "claude":
         process.exit(await walk(CLAUDE_TREE, ["claude"], rest));
+        return;
+
+      case "opencode":
+        process.exit(await walk(OPENCODE_TREE, ["opencode"], rest));
         return;
 
       // Flat aliases for convenience.
