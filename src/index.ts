@@ -33,7 +33,12 @@ async function runServe(args: string[]): Promise<never> {
   const cfg = envOverride(raw);
   setLogLevel(cfg.log_level);
   const pool = new AccountPool(cfg.claude, configPath);
-  const server = startServer(cfg, pool);
+  const dumpPath = flag(args, "--dump-requests") ?? null;
+  const server = startServer(cfg, pool, dumpPath ? resolve(dumpPath) : null);
+
+  if (dumpPath) {
+    log.warn("dump mode active — pool bypassed, every request forwarded verbatim + logged", { path: resolve(dumpPath) });
+  }
 
   primeClaudeVersion();
   await maybeWireOpencode(cfg, args);

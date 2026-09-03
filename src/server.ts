@@ -3,6 +3,7 @@ import type { Config } from "./types";
 type BunServer = ReturnType<typeof Bun.serve>;
 import { AccountPool } from "./pool";
 import { forwardWithPool } from "./forward";
+import { transparentForward } from "./dump";
 import { log } from "./log";
 
 const PROXIED_PATH_PREFIXES = ["/v1/messages", "/v1/complete"];
@@ -94,7 +95,7 @@ function isProxied(pathname: string): boolean {
   return canonicalizePath(pathname) !== null;
 }
 
-export function startServer(cfg: Config, pool: AccountPool): BunServer {
+export function startServer(cfg: Config, pool: AccountPool, dumpPath: string | null = null): BunServer {
   const server = Bun.serve({
     hostname: cfg.host,
     port: cfg.port,
@@ -112,6 +113,33 @@ export function startServer(cfg: Config, pool: AccountPool): BunServer {
       if (url.pathname === "/status") {
         if (!checkAuth(cfg, req)) return unauthorized();
         return statusJson(pool);
+      }
+
+      // --dump-requests: bypass the pool, forward EVERY request (including
+      // paths we normally 404) upstream verbatim, log both directions to
+      // `dumpPath` as JSONL. For capturing the real wire format Claude Code
+      // uses so we can compare with what other clients send.
+      if (dumpPath) {
+        const bodyText = req.method === "GET" || req.method === "HEAD"
+          ? null
+          : await req.text();
+        try {
+          const res = await transparentForward(
+            cfg,
+            req.method,
+            url.pathname + url.search,
+            req.headers,
+            bodyText,
+            dumpPath,
+          );
+          log.info("dump", { method: req.method, path: url.pathname, status: res.status, ms: Date.now() - started });
+          return res;
+        } catch (err) {
+          log.error("dump forward failed", { err: String(err) });
+          return new Response(JSON.stringify({ type: "error", error: { message: String(err) } }), {
+            status: 502, headers: { "content-type": "application/json" },
+          });
+        }
       }
 
       if ((url.pathname === "/v1/models" || url.pathname === "/models") && req.method === "GET") {
