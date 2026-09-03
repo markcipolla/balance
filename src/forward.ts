@@ -108,7 +108,7 @@ function classifyAccountUnusable(
 
   // API key: pay-as-you-go account with no balance.
   if (msg.includes("credit balance") || msg.includes("credits balance") || msg.includes("insufficient credit")) {
-    return { unusable: true, reason: "no credit", cooldownSeconds: 60 * 60 };
+    return { unusable: true, reason: "no credit", cooldownSeconds: 10 * 60 };
   }
 
   // OAuth subscription: exhausted for the current billing / weekly / 5-hour window.
@@ -121,7 +121,7 @@ function classifyAccountUnusable(
     msg.includes("usage limit") ||
     info.type === "permission_error" && msg.includes("subscription");
   if (subscriptionExhausted) {
-    return { unusable: true, reason: "quota exhausted", cooldownSeconds: 60 * 60 };
+    return { unusable: true, reason: "quota exhausted", cooldownSeconds: 10 * 60 };
   }
 
   return null;

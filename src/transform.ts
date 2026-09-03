@@ -40,7 +40,13 @@ function billingBlock(version: string): SystemBlock {
   return { type: "text", text: `${BILLING_PREFIX} cc_version=${version}; cc_entrypoint=cli;` };
 }
 
-const IDENTITY_BLOCK: SystemBlock = { type: "text", text: CLAUDE_CODE_IDENTITY };
+// Match Claude Code's identity block shape exactly — including the ephemeral
+// 1h cache_control. Anthropic's classifier appears to fingerprint on this.
+const IDENTITY_BLOCK: SystemBlock = {
+  type: "text",
+  text: CLAUDE_CODE_IDENTITY,
+  cache_control: { type: "ephemeral", ttl: "1h" },
+};
 
 export function injectClaudeCodeIdentity(
   body: Record<string, unknown>,
