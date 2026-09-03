@@ -26,8 +26,10 @@ abstract class BaseAccount implements Common {
   protected lastUsedAt = 0;
   protected ratelimit: RateLimitState = {
     requests_remaining: null,
+    requests_limit: null,
     requests_reset_at: null,
     tokens_remaining: null,
+    tokens_limit: null,
     tokens_reset_at: null,
     cooldown_until: null,
     last_error: null,
@@ -75,8 +77,10 @@ abstract class BaseAccount implements Common {
       return Number.isFinite(t) ? t : null;
     };
     this.ratelimit.requests_remaining = readInt("anthropic-ratelimit-requests-remaining");
+    this.ratelimit.requests_limit = readInt("anthropic-ratelimit-requests-limit");
     this.ratelimit.requests_reset_at = readIso("anthropic-ratelimit-requests-reset");
     this.ratelimit.tokens_remaining = readInt("anthropic-ratelimit-tokens-remaining");
+    this.ratelimit.tokens_limit = readInt("anthropic-ratelimit-tokens-limit");
     this.ratelimit.tokens_reset_at = readIso("anthropic-ratelimit-tokens-reset");
 
     // Capture every anthropic-ratelimit-* header verbatim so subscription

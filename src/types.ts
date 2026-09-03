@@ -37,8 +37,10 @@ export type AccountKind = "subscription" | "api_key";
 
 export interface RateLimitState {
   requests_remaining: number | null;
+  requests_limit: number | null;
   requests_reset_at: number | null;
   tokens_remaining: number | null;
+  tokens_limit: number | null;
   tokens_reset_at: number | null;
   cooldown_until: number | null;
   last_error: string | null;

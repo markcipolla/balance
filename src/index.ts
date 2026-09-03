@@ -5,7 +5,8 @@ import { envOverride, loadConfig } from "./config";
 import { defaultConfigPath } from "./paths";
 import { AccountPool } from "./pool";
 import { startServer } from "./server";
-import { setLogLevel, log } from "./log";
+import { setLogLevel, setLogSink, log } from "./log";
+import { shouldUseDashboard, startDashboard } from "./dashboard";
 
 const VERSION = pkg.version;
 import {
@@ -35,8 +36,13 @@ async function runServe(args: string[]): Promise<never> {
 
   await maybeWireOpencode(cfg, args);
 
+  const wantTui = !args.includes("--no-tui") && shouldUseDashboard();
+  const dashboard = wantTui ? (setLogSink("buffer", 200), startDashboard(pool, cfg)) : null;
+
   return new Promise<never>((_resolve, _reject) => {
     const shutdown = (signal: string) => {
+      dashboard?.stop();
+      setLogSink("console");
       log.info("shutting down", { signal });
       server.stop(true);
       process.exit(0);

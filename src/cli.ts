@@ -421,8 +421,9 @@ export function usage(): string {
   return `balance — pool multiple Claude accounts behind an Anthropic-compatible endpoint
 
 usage:
-  balance serve   [--config <path>] [--wire-opencode [--project]]
+  balance serve   [--config <path>] [--no-tui] [--wire-opencode [--project]]
                                                                start the proxy server
+                                                               --no-tui   disables the live dashboard (auto-off when stdout isn't a TTY)
                                                                --wire-opencode installs opencode config first
   balance init    [<config-path>]                              create an empty config.json
   balance status  [--config <path>]                            live pool status (queries running server)
