@@ -1,43 +1,52 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readCredentials, writeCredentials } from "./credentials";
+import { readCredentials, writeCredentials, type ClaudeCredentials } from "./credentials";
 import { refreshAccessToken } from "./oauth";
+import { writeKeychainCreds, isMac } from "./keychain";
 import { log } from "./log";
 
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
-// Fetch a fresh access token for the account, refreshing on disk if the
-// current one is within the expiry margin. Returns null if the account has
-// no credentials yet (e.g. added but never OAuth'd).
-async function accessTokenFor(accountDir: string): Promise<string | null> {
+// Load credentials for the account, refreshing on disk if within expiry
+// margin. Returns null if the account has no credentials yet.
+async function loadFreshCredentials(accountDir: string): Promise<ClaudeCredentials | null> {
   const creds = await readCredentials(accountDir);
   if (!creds) return null;
-  const { accessToken, refreshToken, expiresAt, scopes } = creds.claudeAiOauth;
-  if (expiresAt - REFRESH_MARGIN_MS > Date.now()) return accessToken;
+  const { refreshToken, expiresAt, scopes } = creds.claudeAiOauth;
+  if (expiresAt - REFRESH_MARGIN_MS > Date.now()) return creds;
   try {
     log.info("refreshing access token", { dir: accountDir });
     const t = await refreshAccessToken(refreshToken);
-    await writeCredentials(accountDir, {
+    const refreshed: ClaudeCredentials = {
       claudeAiOauth: {
         accessToken: t.access_token,
         refreshToken: t.refresh_token,
         expiresAt: t.expires_at,
         scopes,
       },
-    });
-    return t.access_token;
+    };
+    await writeCredentials(accountDir, refreshed);
+    return refreshed;
   } catch (err) {
     log.warn("token refresh failed — Claude Code may prompt for a fresh login", { err: String(err) });
-    return accessToken; // return the stale token; Claude Code will surface the auth error
+    return creds; // return stale creds; Claude Code will surface the auth error
   }
 }
 
-// Launch Claude Code as a specific account. On macOS Claude Code checks the
-// Keychain for OAuth before falling back to `<CLAUDE_CONFIG_DIR>/.credentials.json`,
-// so setting CLAUDE_CONFIG_DIR alone isn't enough to force a specific account
-// — CLAUDE_CODE_OAUTH_TOKEN bypasses Keychain entirely and takes precedence.
-// stdio is inherited so the user sees Claude Code's TUI directly; balance
-// exits with Claude Code's exit code once it's done.
+// Launch Claude Code as a specific account.
+//
+// Auth precedence Claude Code TUI uses on macOS:
+//   1. macOS Keychain entry ("Claude Code-credentials" service).
+//   2. `<CLAUDE_CONFIG_DIR>/.credentials.json` — only checked if Keychain is empty.
+//   Env vars like CLAUDE_CODE_OAUTH_TOKEN are honored by SDK/headless mode but
+//   NOT by the interactive TUI (verified empirically — the TUI still prompts).
+//
+// So on macOS we WRITE the account's creds into the Keychain slot before
+// launching. There's only one such slot per Mac user, so this also affects
+// standalone `claude` invocations outside balance — that's inherent to Claude
+// Code's design. On Linux/Windows the file in CLAUDE_CONFIG_DIR is enough.
+//
+// stdio is inherited; balance exits with Claude Code's exit code.
 export async function launchClaudeCode(
   claudeConfigDir: string,
   extraArgs: string[] = [],
@@ -48,18 +57,25 @@ export async function launchClaudeCode(
     process.exit(1);
   }
 
-  const accessToken = await accessTokenFor(claudeConfigDir);
-  if (!accessToken) {
+  const creds = await loadFreshCredentials(claudeConfigDir);
+  if (!creds) {
     log.error("account has no credentials — run: balance account add", { dir: claudeConfigDir });
     process.exit(1);
+  }
+
+  if (isMac()) {
+    const ok = await writeKeychainCreds(creds);
+    if (!ok) {
+      log.warn("could not update Keychain — Claude Code may launch as a different account or prompt for login");
+    }
   }
 
   const env: Record<string, string | undefined> = {
     ...process.env,
     CLAUDE_CONFIG_DIR: claudeConfigDir,
     CLAUDE_HOME: claudeConfigDir,
-    // Bypass Keychain and any pre-existing login: this token wins.
-    CLAUDE_CODE_OAUTH_TOKEN: accessToken,
+    // Belt-and-suspenders: also expose the token via env for SDK/headless paths.
+    CLAUDE_CODE_OAUTH_TOKEN: creds.claudeAiOauth.accessToken,
   };
 
   const child = spawn(binary, extraArgs, {

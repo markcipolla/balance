@@ -9,7 +9,9 @@ Pick a Claude account, launch Claude Code with it. Multiple Claude Code accounts
 - `balance run <name>` skips the picker.
 - `balance account add` runs the Claude OAuth flow and saves the resulting credentials into a new account dir. No `claude` install needed to add accounts.
 
-Balance is a *launcher*, not a proxy. It just sets `CLAUDE_CONFIG_DIR` and hands off to `claude`. Every request goes to the real, sanctioned Claude Code CLI — no request rewriting, no header spoofing, no compat surface to break.
+Balance is a *launcher*, not a proxy. It sets `CLAUDE_CONFIG_DIR`, writes the account's credentials into the Keychain slot Claude Code TUI reads from (on macOS), and hands off to `claude`. Every request goes to the real, sanctioned Claude Code CLI — no request rewriting, no header spoofing, no compat surface to break.
+
+**macOS caveat**: Claude Code TUI on macOS reads OAuth from a single machine-wide Keychain slot (service: `Claude Code-credentials`). balance overwrites that slot each launch, which means running `claude` directly outside balance will use whichever account balance most recently launched. The first launch may trigger a Keychain permission dialog — pick "Always Allow" to skip it thereafter.
 
 ## Requirements
 
