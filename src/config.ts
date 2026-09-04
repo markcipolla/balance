@@ -95,11 +95,20 @@ export function findAccount(cfg: Config, name: string): Account | null {
   return cfg.accounts.find((a) => a.name === name) ?? null;
 }
 
-export function addAccount(cfg: Config, account: Account): Account {
-  const existing = new Set(cfg.accounts.map((a) => a.name));
-  if (existing.has(account.name)) {
+export function addAccount(cfg: Config, account: Account, opts: { replace?: boolean } = {}): Account {
+  const existing = cfg.accounts.find((a) => a.name === account.name);
+  if (existing) {
+    // An explicit --name means "this account" — re-authenticating it should
+    // rewrite its credentials in place, not leave a "<name>-2" beside it.
+    // added_at/last_used_at describe the profile dir, which we keep, so only
+    // the email the fresh login reports is refreshed.
+    if (opts.replace) {
+      existing.email = account.email ?? existing.email;
+      return existing;
+    }
+    const taken = new Set(cfg.accounts.map((a) => a.name));
     let n = 2;
-    while (existing.has(`${account.name}-${n}`)) n += 1;
+    while (taken.has(`${account.name}-${n}`)) n += 1;
     account.name = `${account.name}-${n}`;
   }
   cfg.accounts.push(account);

@@ -76,6 +76,8 @@ balance run [<name>] [-- <claude args>...]   launch <name>; picker if omitted
                                               args after -- forward to claude
 
 balance account add   [--name <n>] [--no-browser]   OAuth login, save as isolated account
+                                                     an existing --name is re-authenticated
+                                                     in place, keeping its profile dir
 balance account list  [--usage]                     list accounts (add --usage for live 5h/7d)
 balance account switch <name>                       set default account
 balance account remove <name>                       delete an account (removes credentials)
@@ -85,6 +87,25 @@ balance --version       print version
 ```
 
 Aliases from the v0.x proxy era (`login`, `list`, `remove`, `switch`) still work.
+
+### Re-authenticating an account
+
+If an account's refresh token stops working — `invalid_grant` on launch, or Claude
+Code 401s with "OAuth access token has been revoked" — re-run `add` with that
+account's name:
+
+```bash
+balance account add --name work
+```
+
+Same name means the same account: balance replaces its credentials and leaves the
+profile dir (sessions, history, `.claude.json`) alone. `remove` followed by `add`
+also works, but `remove` deletes the profile dir along with the credentials.
+
+Note that signing in again from *inside* a balance-launched Claude Code (`/login`)
+does not fix the account: balance passes the token via `CLAUDE_CODE_OAUTH_TOKEN`,
+so Claude Code treats it as externally managed and never writes the new tokens
+back to the account dir. The fresh login lasts only for that session.
 
 ## Config
 

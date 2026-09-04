@@ -68,22 +68,40 @@ export async function runAccountAdd(args: string[]): Promise<number> {
   const name = flag(args, "--name") ?? null;
   const noOpen = args.includes("--no-browser");
 
+  // Named an account that already exists? Say so before the browser opens —
+  // this run re-authenticates it rather than adding a second copy.
+  if (name && findAccount(await loadOrEmpty(configPath), name)) {
+    console.log(`Account "${name}" already exists — re-authenticating it in place.`);
+    console.log(dim(`Its Claude Code profile in ${accountDir(name)} is kept; only the credentials change.`));
+  }
+
   const result = await runOAuthLogin({ name, open: !noOpen });
 
   const cfg = await loadOrEmpty(configPath);
+  // Snapshot before addAccount — on the replace path it mutates this entry.
+  const previous = name ? findAccount(cfg, name) : null;
+  const replacing = previous !== null;
+  const previousEmail = previous?.email ?? null;
   const account: Account = {
     name: result.name,
     email: result.email,
     last_used_at: null,
     added_at: Date.now(),
   };
-  const added = addAccount(cfg, account);
+  const added = addAccount(cfg, account, { replace: name !== null });
 
   await writeCredentials(accountDir(added.name), result.credentials);
   await writeConfig(configPath, cfg);
 
   const who = result.email ? ` (${result.email})` : "";
-  console.log(`\nAdded account "${added.name}"${who}.`);
+  if (replacing) {
+    if (previousEmail && result.email && previousEmail !== result.email) {
+      console.log(`\n${yellow("⚠")} "${added.name}" was ${previousEmail} — it now points at ${result.email}.`);
+    }
+    console.log(`\nReplaced the credentials for account "${added.name}"${who}.`);
+  } else {
+    console.log(`\nAdded account "${added.name}"${who}.`);
+  }
   console.log(`Credentials: ${accountDir(added.name)}`);
   console.log(`\nLaunch it with: balance run ${added.name}`);
   console.log(`Or run bare 'balance' to pick from all accounts.`);
@@ -209,6 +227,7 @@ usage:
   balance run [<name>] [-- <claude args>...]  launch Claude Code as <name> (or pick if omitted)
 
   balance account add   [--name <n>] [--no-browser]   OAuth login, save as isolated Claude account
+                                                      (an existing --name is re-authenticated in place)
   balance account list  [--usage]                     list accounts (add --usage for live 5h/7d)
   balance account switch <name>                       change default account
   balance account remove <name>                       delete an account (removes credentials on disk)
