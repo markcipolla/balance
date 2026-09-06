@@ -8,10 +8,13 @@ Pick a Claude account, launch Claude Code with it. Multiple Claude Code accounts
 - `balance` (bare, no args) fetches live 5-hour and weekly utilization per account, shows a picker, launches Claude Code as whichever account you pick.
 - `balance run <name>` skips the picker.
 - `balance account add` runs the Claude OAuth flow and saves the resulting credentials into a new account dir. No `claude` install needed to add accounts.
+- `balance shared init` hoists the *configuration* half of an account dir — skills, agents, commands, plugins, MCP servers, settings, memory — into one `~/.balance/shared` that every account launches with.
 
 Balance is a *launcher*, not a proxy. It sets `CLAUDE_CONFIG_DIR`, writes the account's credentials into the Keychain slot Claude Code TUI reads from (on macOS), and hands off to `claude`. Every request goes to the real, sanctioned Claude Code CLI — no request rewriting, no header spoofing, no compat surface to break.
 
 **macOS caveat**: Claude Code TUI on macOS reads OAuth from a single machine-wide Keychain slot (service: `Claude Code-credentials`). balance overwrites that slot each launch, which means running `claude` directly outside balance will use whichever account balance most recently launched. The first launch may trigger a Keychain permission dialog — pick "Always Allow" to skip it thereafter.
+
+That slot is Claude Code's whole credential store, not just the Anthropic token — MCP server logins live there too, under `mcpOAuth`. balance rewrites only `claudeAiOauth` and carries the rest across, so `claude mcp login` survives a relaunch. (On Linux the store is the per-account `.credentials.json`, so MCP logins stay per-account there.)
 
 ## Requirements
 
@@ -82,6 +85,12 @@ balance account list  [--usage]                     list accounts (add --usage f
 balance account switch <name>                       set default account
 balance account remove <name>                       delete an account (removes credentials)
 
+balance shared init   [--from <account>]            set up ~/.balance/shared, optionally
+                                                     lifting one account's config into it
+balance shared link   [--force]                     (re)link every account to the shared layer
+balance shared status                               show what is shared, and which accounts
+                                                     are actually linked to it
+
 balance --help          full usage
 balance --version       print version
 ```
@@ -107,6 +116,56 @@ does not fix the account: balance passes the token via `CLAUDE_CODE_OAUTH_TOKEN`
 so Claude Code treats it as externally managed and never writes the new tokens
 back to the account dir. The fresh login lasts only for that session.
 
+## Shared config
+
+Every account dir is a full `CLAUDE_CONFIG_DIR`, which mixes two different
+things: **identity** (OAuth credentials, `oauthAccount`, per-account caches)
+and **configuration** (skills, agents, commands, plugins, MCP servers,
+settings, memory). Only the first has any reason to be per-account. Without
+sharing, a second login means re-installing every skill and re-approving every
+MCP server — the accounts are the same person either way.
+
+```bash
+balance shared init --from work   # lift work's config up into ~/.balance/shared
+balance shared status             # see what's shared and who's linked
+```
+
+```
+~/.balance/shared/
+  CLAUDE.md      user memory, @imported by each account's CLAUDE.md
+  settings.json  passed to Claude Code as --settings
+  mcp.json       passed to Claude Code as --mcp-config
+  projects.json  per-project MCP approvals and trust, carried between accounts
+  skills/        symlinked into every account dir
+  agents/          "
+  commands/        "
+  plugins/         "
+  memory/<project>/   symlinked in as projects/<project>/memory
+```
+
+The mechanism differs per item because it has to. Directories are symlinked.
+Files Claude Code rewrites itself are not — an atomic write-and-rename
+replaces a symlink with a real file and silently un-shares it — so settings
+and MCP servers go in as launch flags, and user memory as an `@import` line
+that survives being rewritten.
+
+`.claude.json` gets a narrower treatment again. It holds account identity
+*and* the per-project state that decides whether a repo's `.mcp.json` servers
+come up at all (`enabledMcpjsonServers`, `hasTrustDialogAccepted`), so balance
+seeds just those keys before launch and reads back what the session decided
+after it exits. Approve a project's MCP servers once, in any account, and the
+rest inherit it.
+
+Nothing here is on until `~/.balance/shared` exists. `shared init` never
+overwrites: a real directory where a symlink should go is reported and left
+alone until you re-run with `--force`, which moves it to `<name>.pre-balance`
+first. Turn the layer off for one launch with `--no-shared`, or entirely with
+`"shared": {"enabled": false}` in `config.json`.
+
+**What this shares that you may not want shared**: trust dialogs. Accepting
+the trust prompt for a directory in one account accepts it for the others. Set
+`"projects": false` if you'd rather each account decide for itself.
+
 ## Config
 
 `~/.balance/config.json`:
@@ -116,6 +175,15 @@ back to the account dir. The fresh login lasts only for that session.
   "active": "work",
   "claude_binary": "claude",
   "log_level": "info",
+  "shared": {
+    "enabled": true,
+    "dirs": ["skills", "agents", "commands", "plugins"],
+    "mcp": true,
+    "strict_mcp": false,
+    "settings": true,
+    "memory": true,
+    "projects": true
+  },
   "accounts": [
     { "name": "work", "email": "mark@example.com", "last_used_at": 1788418333140, "added_at": 1788418275400 }
   ]
@@ -127,6 +195,7 @@ Each account's OAuth credentials live at `~/.balance/accounts/<name>/.credential
 Env overrides:
 - `BALANCE_CLAUDE_BINARY` — path to the `claude` executable (default: `claude` on PATH).
 - `BALANCE_LOG_LEVEL` — `debug | info | warn | error`.
+- `BALANCE_SHARED` — set to `0` to disable the shared config layer.
 
 ## Notes
 
