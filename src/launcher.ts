@@ -3,6 +3,8 @@ import { existsSync } from "node:fs";
 import { readCredentials, writeCredentials, type ClaudeCredentials } from "./credentials";
 import { refreshAccessToken } from "./oauth";
 import { writeKeychainCreds, isMac } from "./keychain";
+import { applySharedLayer, harvestProjectState, sharedActive, sharedLaunchArgs } from "./shared";
+import type { SharedSettings } from "./types";
 import { log } from "./log";
 
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
@@ -51,6 +53,7 @@ export async function launchClaudeCode(
   claudeConfigDir: string,
   extraArgs: string[] = [],
   binary: string = "claude",
+  shared?: SharedSettings,
 ): Promise<void> {
   if (!existsSync(claudeConfigDir)) {
     log.error("account directory not found", { dir: claudeConfigDir });
@@ -70,6 +73,22 @@ export async function launchClaudeCode(
     }
   }
 
+  // The shared config layer, pushed down into this account dir. Both halves
+  // run while Claude Code is *not* running: .claude.json is rewritten from
+  // under us the moment the child starts, so we touch it before spawn and
+  // read it back only after exit.
+  const cwd = process.cwd();
+  const useShared = shared !== undefined && sharedActive(shared);
+  let args = extraArgs;
+  if (useShared) {
+    try {
+      await applySharedLayer(claudeConfigDir, cwd, shared);
+      args = [...extraArgs, ...sharedLaunchArgs(shared, extraArgs)];
+    } catch (err) {
+      log.warn("could not apply the shared config layer — launching without it", { err: String(err) });
+    }
+  }
+
   const env: Record<string, string | undefined> = {
     ...process.env,
     CLAUDE_CONFIG_DIR: claudeConfigDir,
@@ -78,12 +97,18 @@ export async function launchClaudeCode(
     CLAUDE_CODE_OAUTH_TOKEN: creds.claudeAiOauth.accessToken,
   };
 
-  const child = spawn(binary, extraArgs, {
+  const child = spawn(binary, args, {
     stdio: "inherit",
     env,
   });
 
-  child.on("exit", (code, signal) => {
+  child.on("exit", async (code, signal) => {
+    // Carry anything the session decided — MCP approvals, a trust dialog —
+    // back up to the shared layer, so the next account inherits it.
+    if (useShared && shared.projects) {
+      try { await harvestProjectState(claudeConfigDir, cwd); }
+      catch (err) { log.debug("could not harvest project state", { err: String(err) }); }
+    }
     if (signal) process.kill(process.pid, signal);
     else process.exit(code ?? 0);
   });

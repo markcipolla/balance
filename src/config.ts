@@ -1,15 +1,26 @@
 import { existsSync } from "node:fs";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { Account, Config, LogLevel } from "./types";
+import type { Account, Config, LogLevel, SharedSettings } from "./types";
 import { accountDir, baseDir } from "./paths";
 import { writeCredentials } from "./credentials";
 import { log } from "./log";
+
+const SHARED_DEFAULTS: SharedSettings = {
+  enabled: true,
+  dirs: ["skills", "agents", "commands", "plugins"],
+  mcp: true,
+  strict_mcp: false,
+  settings: true,
+  memory: true,
+  projects: true,
+};
 
 const DEFAULTS: Omit<Config, "accounts"> = {
   active: null,
   claude_binary: "claude",
   log_level: "info",
+  shared: SHARED_DEFAULTS,
 };
 
 // Old (v0.x) config shape balance used when it was a proxy. Migrated to the
@@ -28,7 +39,7 @@ interface LegacyConfig {
 }
 
 export function emptyConfig(): Config {
-  return { ...DEFAULTS, accounts: [] };
+  return { ...DEFAULTS, shared: { ...SHARED_DEFAULTS }, accounts: [] };
 }
 
 async function migrateLegacy(raw: LegacyConfig): Promise<Config> {
@@ -80,6 +91,9 @@ export async function loadConfig(path: string): Promise<Config> {
   return {
     ...DEFAULTS,
     ...cfg,
+    // Nested, so a config written before the shared layer existed — or one
+    // that only overrides a single knob — still gets the rest of the defaults.
+    shared: { ...SHARED_DEFAULTS, ...(cfg.shared ?? {}) },
     accounts: Array.isArray(cfg.accounts) ? cfg.accounts : [],
   };
 }
@@ -126,7 +140,9 @@ export function removeAccount(cfg: Config, name: string): boolean {
 export function envOverride(cfg: Config): Config {
   const claude_binary = process.env.BALANCE_CLAUDE_BINARY ?? cfg.claude_binary;
   const log_level = (process.env.BALANCE_LOG_LEVEL as LogLevel | undefined) ?? cfg.log_level;
-  return { ...cfg, claude_binary, log_level };
+  const off = process.env.BALANCE_SHARED === "0" || process.env.BALANCE_SHARED === "false";
+  const shared = off ? { ...cfg.shared, enabled: false } : cfg.shared;
+  return { ...cfg, claude_binary, log_level, shared };
 }
 
 // Kept for compatibility with tools that still call these — no-ops now that
