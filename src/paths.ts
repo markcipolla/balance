@@ -5,8 +5,11 @@ export function defaultConfigPath(): string {
   return join(baseDir(), "config.json");
 }
 
+// Everything balance owns lives under here. BALANCE_HOME relocates the lot,
+// which is what lets the test suite run against a temp dir instead of the
+// real ~/.balance — and is a useful escape hatch besides.
 export function baseDir(): string {
-  return join(homedir(), ".balance");
+  return process.env.BALANCE_HOME ?? join(homedir(), ".balance");
 }
 
 // Each account lives in its own isolated CLAUDE_CONFIG_DIR under here — so

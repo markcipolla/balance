@@ -210,12 +210,36 @@ Env overrides:
 - `BALANCE_CLAUDE_BINARY` — path to the `claude` executable (default: `claude` on PATH).
 - `BALANCE_LOG_LEVEL` — `debug | info | warn | error`.
 - `BALANCE_SHARED` — set to `0` to disable the shared config layer.
+- `BALANCE_HOME` — relocate everything balance owns (default: `~/.balance`). The test suite uses it to stay off your real config.
 
 ## Notes
 
 - **Passing args to Claude Code**: `balance run work -- --model opus --print "hello"` — everything after `--` is forwarded verbatim.
 - **Team plans**: Claude Code itself works on Team subscriptions. Non-Claude-Code agents (opencode, aider, Cline, etc.) via HTTP proxies do *not* — Anthropic's classifier routes tool-bearing requests to workspace extra-usage on Team plans regardless of how the proxy authenticates. See [Meridian issue #516](https://github.com/rynfar/meridian/issues/516). balance sidesteps this entirely by launching Claude Code itself, which is on the sanctioned path.
 - **Not a proxy**: balance v0.x was an Anthropic-API-compatible proxy that tried to pool subscriptions for third-party clients. That approach is fundamentally blocked on Team plans and got dropped in v1.0.0. Migration from an old `config.json` is automatic on first run.
+
+## Development
+
+```bash
+bun install
+bun run check     # typecheck + tests
+bun test          # just the tests
+bun run build     # dist/balance
+```
+
+The suite covers the parts with teeth: the merge that moves skills and plugin
+directories between accounts, the per-project MCP seeding and harvesting, the
+launch flags, and the Keychain blob merge. Every test runs against its own
+`BALANCE_HOME` under the system temp dir, so nothing can reach your real
+`~/.balance`, and the Keychain merge is tested as a pure function rather than
+against the real Keychain.
+
+CI runs typecheck, tests and a build on **self-hosted runners**, which means
+fork pull requests must never reach it — a fork's code would run on our own
+hardware. `.github/workflows/ci.yml` refuses any run whose repository isn't
+this one, or whose pull request comes from a fork. Keep the repo settings that
+back that up: *Settings > Actions > General >* require approval for outside
+collaborators, and scope the runner group to this repository only.
 
 ## Releasing
 

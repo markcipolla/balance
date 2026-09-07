@@ -45,6 +45,15 @@ async function readKeychainBlob(): Promise<Record<string, unknown> | null> {
   }
 }
 
+// Fold our credentials into whatever the slot already held. Split out from
+// writeKeychainCreds so the merge rule is testable without a real Keychain.
+export function mergeKeychainBlob(
+  existing: Record<string, unknown> | null,
+  creds: ClaudeCredentials,
+): Record<string, unknown> {
+  return { ...(existing ?? {}), ...creds };
+}
+
 // Write the given credentials into the Keychain slot Claude Code TUI reads.
 // Idempotent — deletes any existing entry first so we don't accumulate slots.
 // The first call may trigger a macOS permission dialog; the user can pick
@@ -61,7 +70,7 @@ export async function writeKeychainCreds(creds: ClaudeCredentials): Promise<bool
   const existing = await readKeychainBlob();
   const preserved = Object.keys(existing ?? {}).filter((k) => k !== "claudeAiOauth");
   if (preserved.length > 0) log.debug("preserving non-Anthropic keys in the Keychain blob", { keys: preserved });
-  const value = JSON.stringify({ ...(existing ?? {}), ...creds });
+  const value = JSON.stringify(mergeKeychainBlob(existing, creds));
 
   // Best-effort delete of any existing entry — ignore errors (entry may not exist yet).
   await spawnAsync("security", ["delete-generic-password", "-s", SERVICE, "-a", account]);

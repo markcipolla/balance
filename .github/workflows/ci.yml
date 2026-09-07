@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only by default; nothing here needs to write to the repo.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # These runners are our own hardware. A workflow run originating from a
+    # fork would execute unreviewed code on it, with whatever that machine can
+    # reach — so refuse anything that isn't this repository talking to itself:
+    # a pull_request from a fork has head.repo != this repo, and a push event
+    # on someone's fork carries their repository name.
+    #
+    # This is the belt. The braces live in repo settings, and are worth
+    # keeping in place: Settings > Actions > General > "Require approval for
+    # all outside collaborators", and restricting the runner group to this
+    # repository only.
+    if: >-
+      github.repository == 'markcipolla/balance'
+      && (github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: self-hosted
+    timeout-minutes: 15
+
+    env:
+      # Keep the suite off the runner's real ~/.balance. Individual tests set
+      # this per-case as well; this is the backstop for anything that forgets.
+      BALANCE_HOME: ${{ runner.temp }}/balance-home
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # A self-hosted runner keeps its workspace between runs — don't
+          # leave a usable git credential lying in it.
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      # The release workflow is tag-triggered and has no gate of its own, so a
+      # compile failure would otherwise surface for the first time at release.
+      - name: Build
+        run: bun run build

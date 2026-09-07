@@ -307,12 +307,18 @@ export async function initShared(dirs: readonly string[]): Promise<void> {
   if (!existsSync(sharedMcpPath())) await writeJson(sharedMcpPath(), { mcpServers: {} });
 }
 
-// How deep the merge walks before it stops trying to reconcile and parks the
-// whole subtree instead. Two levels covers skills/<skill>/, plugins/cache/<x>,
-// plugins/marketplaces/<name>; going deeper would mean walking a cloned
-// marketplace repo file by file on every first launch, for no benefit — a
-// colliding marketplace is the same public repo in both accounts.
-const MERGE_DEPTH = 2;
+// How deep the merge reconciles before it parks a colliding subtree whole.
+//
+// The unit of merge is a *named thing*, and how deep that sits differs by
+// directory. skills/, agents/ and commands/ hold one unit per entry, so a
+// collision parks the whole entry — half-merging two accounts' versions of
+// the same skill would produce something neither of them had. plugins/ holds
+// container dirs (marketplaces/, cache/, data/) whose *entries* are the
+// units, so it reconciles one level further and stops there: a colliding
+// marketplace is the same cloned public repo in both accounts, and walking it
+// file by file on first launch would buy nothing.
+const MERGE_DEPTH: Record<string, number> = { plugins: 1 };
+const DEFAULT_MERGE_DEPTH = 0;
 
 // Files worth reconciling rather than picking a winner for.
 const MEMORY_INDEX = "MEMORY.md";
@@ -372,7 +378,7 @@ async function mergeJsonManifest(from: string, to: string): Promise<void> {
 // Merge `from` into `to` entry by entry. Anything `to` doesn't have moves
 // across; anything it does have is reconciled where that's meaningful, and
 // parked otherwise. Nothing is ever deleted except a file we just merged.
-async function mergeInto(from: string, to: string, aside: string, report: AdoptReport, depth = 0): Promise<void> {
+async function mergeInto(from: string, to: string, aside: string, report: AdoptReport, maxDepth: number, depth = 0): Promise<void> {
   for (const entry of await readdir(from)) {
     const src = join(from, entry);
     const dest = join(to, entry);
@@ -390,8 +396,8 @@ async function mergeInto(from: string, to: string, aside: string, report: AdoptR
       continue;
     }
     const bothDirs = lstatSync(src).isDirectory() && lstatSync(dest).isDirectory();
-    if (bothDirs && depth < MERGE_DEPTH) {
-      await mergeInto(src, dest, join(aside, entry), report, depth + 1);
+    if (bothDirs && depth < maxDepth) {
+      await mergeInto(src, dest, join(aside, entry), report, maxDepth, depth + 1);
       if (await isEmptyDir(src)) await rm(src, { recursive: true, force: true });
       continue;
     }
@@ -428,7 +434,7 @@ export async function adoptAccount(dir: string, dirs: readonly string[]): Promis
     if (linkState(from) !== "real") continue;
     const to = join(sharedDir(), sub);
     await mkdir(to, { recursive: true });
-    await mergeInto(from, to, `${from}.pre-balance`, report);
+    await mergeInto(from, to, `${from}.pre-balance`, report, MERGE_DEPTH[sub] ?? DEFAULT_MERGE_DEPTH);
     if (await isEmptyDir(from)) {
       await rm(from, { recursive: true, force: true });
       report.adopted.push(`${sub}/`);
@@ -452,7 +458,8 @@ export async function adoptAccount(dir: string, dirs: readonly string[]): Promis
       if (linkState(from) !== "real") continue;
       const to = join(sharedMemoryDir(), slug);
       await mkdir(to, { recursive: true });
-      await mergeInto(from, to, `${from}.pre-balance`, report);
+      // One memory per file, so a collision parks that file alone.
+      await mergeInto(from, to, `${from}.pre-balance`, report, DEFAULT_MERGE_DEPTH);
       if (await isEmptyDir(from)) {
         await rm(from, { recursive: true, force: true });
         report.adopted.push(`memory/${slug}`);
