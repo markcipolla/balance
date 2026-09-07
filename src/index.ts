@@ -8,6 +8,7 @@ import {
   runAccountRemove,
   runAccountSwitch,
   runRun,
+  runSharedStatus,
   usage,
 } from "./cli";
 
@@ -65,6 +66,11 @@ async function main(): Promise<void> {
 
       case "account":
         process.exit(await walk(ACCOUNT_TREE, ["account"], rest));
+        return;
+
+      // The shared config layer needs no setting up — this is just the view.
+      case "shared":
+        process.exit(await runSharedStatus(rest));
         return;
 
       // Flat aliases matching the old (v0.x) CLI surface.

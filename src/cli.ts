@@ -12,6 +12,14 @@ import {
   writeConfig,
 } from "./config";
 import { accountDir, defaultConfigPath } from "./paths";
+import {
+  linkReport,
+  sharedActive,
+  sharedDir,
+  sharedMcpPath,
+  sharedMemoryPath,
+  sharedSettingsPath,
+} from "./shared";
 import { writeCredentials } from "./credentials";
 import { runOAuthLogin } from "./login";
 import { launchClaudeCode } from "./launcher";
@@ -30,7 +38,7 @@ export function flag(args: string[], name: string): string | undefined {
 
 export function positional(args: string[]): string[] {
   const out: string[] = [];
-  const skip = new Set(["--no-browser"]);
+  const skip = new Set(["--no-browser", "--no-shared", "--force", "--usage", "-u"]);
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--") {
@@ -50,6 +58,11 @@ export function positional(args: string[]): string[] {
 export function passThroughArgs(args: string[]): string[] {
   const sep = args.indexOf("--");
   return sep >= 0 ? args.slice(sep + 1) : [];
+}
+
+// `--no-shared` on a single run, without editing config.json.
+function sharedFor(cfg: Config, args: string[]) {
+  return args.includes("--no-shared") ? { ...cfg.shared, enabled: false } : cfg.shared;
 }
 
 function configPathOf(args: string[]): string {
@@ -213,8 +226,39 @@ export async function runRun(args: string[]): Promise<number> {
 
   const dir = accountDir(chosen.name);
   console.log(dim(`Launching Claude Code as "${chosen.name}" (${dir})`));
-  await launchClaudeCode(dir, forwardedArgs, runtime.claude_binary);
+  await launchClaudeCode(dir, forwardedArgs, runtime.claude_binary, sharedFor(runtime, args));
   return 0; // never reached — launcher takes over the process
+}
+
+// ---------- shared: status ----------
+
+export async function runSharedStatus(args: string[]): Promise<number> {
+  const configPath = configPathOf(args);
+  const cfg = await loadOrEmpty(configPath);
+  if (!sharedActive(cfg.shared)) {
+    console.log(`Shared config layer: ${yellow("disabled")} ${dim("(\"shared\": {\"enabled\": false} in config.json)")}`);
+    return 0;
+  }
+  if (!existsSync(sharedDir())) {
+    console.log(`Shared config layer: ${green("on")} ${dim("— nothing hoisted yet; it fills up as you launch each account")}`);
+    return 0;
+  }
+  console.log(`Shared config layer: ${green("on")}  ${dim(sharedDir())}\n`);
+  const flags: string[] = [];
+  if (cfg.shared.mcp && existsSync(sharedMcpPath())) flags.push(`--mcp-config${cfg.shared.strict_mcp ? " --strict-mcp-config" : ""}`);
+  if (cfg.shared.settings && existsSync(sharedSettingsPath())) flags.push("--settings");
+  console.log(`  launch flags   ${flags.length > 0 ? flags.join(" ") : dim("none")}`);
+  console.log(`  user memory    ${existsSync(sharedMemoryPath()) ? green("shared/CLAUDE.md (imported per account)") : dim("—")}`);
+  console.log(`  project state  ${cfg.shared.projects ? green("MCP approvals + trust carried between accounts") : dim("off")}\n`);
+  for (const a of cfg.accounts) {
+    if (!existsSync(accountDir(a.name))) continue;
+    const states = linkReport(accountDir(a.name), cfg.shared.dirs)
+      .map((r) => `${r.name}: ${r.state === "shared" ? green(r.state) : r.state === "own copy" ? yellow(r.state) : dim(r.state)}`)
+      .join("  ");
+    console.log(`  ${bold(a.name)}  ${states}`);
+  }
+  console.log(dim("\nAn account joins the layer the next time you launch it."));
+  return 0;
 }
 
 // ---------- usage / dispatch ----------
@@ -232,17 +276,26 @@ usage:
   balance account switch <name>                       change default account
   balance account remove <name>                       delete an account (removes credentials on disk)
 
+  balance shared                                      show what the shared config layer holds
+
 flags:
   --config <path>   config file (default: ~/.balance/config.json)
+  --no-shared       launch without the shared config layer (run only)
 
 env:
   BALANCE_CLAUDE_BINARY   path to the claude executable (default: "claude" on PATH)
   BALANCE_LOG_LEVEL       debug | info | warn | error
+  BALANCE_SHARED          set to 0 to disable the shared config layer
 
 Each balance account is an isolated Claude Code profile — its own OAuth
 credentials in ~/.balance/accounts/<name>/. When you 'balance run' an
 account, balance launches Claude Code with CLAUDE_CONFIG_DIR pointed at
 that directory, so it signs in as that account without touching your
 machine's default ~/.claude.
+
+Identity stays per-account; configuration does not have to. Skills, agents,
+commands, plugins, MCP servers, settings and memory are hoisted into one
+~/.balance/shared as each account is launched, and pushed back down into
+whichever account you pick. No setup — 'balance shared' shows the result.
 `;
 }

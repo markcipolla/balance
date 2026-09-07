@@ -11,7 +11,9 @@
     "dev": "bun --hot run src/index.ts serve",
     "build": "bun build src/index.ts --compile --outfile dist/balance && ([ \"$(uname)\" = Darwin ] && (codesign --remove-signature dist/balance 2>/dev/null; codesign --sign - --force --deep dist/balance) || true)",
     "build:all": "./scripts/build-all.sh",
-    "typecheck": "tsc --noEmit"
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun test"
   },
   "dependencies": {},
   "devDependencies": {

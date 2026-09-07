@@ -8,10 +8,13 @@ Pick a Claude account, launch Claude Code with it. Multiple Claude Code accounts
 - `balance` (bare, no args) fetches live 5-hour and weekly utilization per account, shows a picker, launches Claude Code as whichever account you pick.
 - `balance run <name>` skips the picker.
 - `balance account add` runs the Claude OAuth flow and saves the resulting credentials into a new account dir. No `claude` install needed to add accounts.
+- The *configuration* half of an account dir — skills, agents, commands, plugins, MCP servers, settings, memory — is hoisted into one `~/.balance/shared` that every account launches with. Automatic; there is nothing to set up.
 
 Balance is a *launcher*, not a proxy. It sets `CLAUDE_CONFIG_DIR`, writes the account's credentials into the Keychain slot Claude Code TUI reads from (on macOS), and hands off to `claude`. Every request goes to the real, sanctioned Claude Code CLI — no request rewriting, no header spoofing, no compat surface to break.
 
 **macOS caveat**: Claude Code TUI on macOS reads OAuth from a single machine-wide Keychain slot (service: `Claude Code-credentials`). balance overwrites that slot each launch, which means running `claude` directly outside balance will use whichever account balance most recently launched. The first launch may trigger a Keychain permission dialog — pick "Always Allow" to skip it thereafter.
+
+That slot is Claude Code's whole credential store, not just the Anthropic token — MCP server logins live there too, under `mcpOAuth`. balance rewrites only `claudeAiOauth` and carries the rest across, so `claude mcp login` survives a relaunch. (On Linux the store is the per-account `.credentials.json`, so MCP logins stay per-account there.)
 
 ## Requirements
 
@@ -82,6 +85,8 @@ balance account list  [--usage]                     list accounts (add --usage f
 balance account switch <name>                       set default account
 balance account remove <name>                       delete an account (removes credentials)
 
+balance shared                                      show what the shared config layer holds
+
 balance --help          full usage
 balance --version       print version
 ```
@@ -107,6 +112,74 @@ does not fix the account: balance passes the token via `CLAUDE_CODE_OAUTH_TOKEN`
 so Claude Code treats it as externally managed and never writes the new tokens
 back to the account dir. The fresh login lasts only for that session.
 
+## Shared config
+
+Every account dir is a full `CLAUDE_CONFIG_DIR`, which mixes two different
+things: **identity** (OAuth credentials, `oauthAccount`, per-account caches)
+and **configuration** (skills, agents, commands, plugins, MCP servers,
+settings, memory). Only the first has any reason to be per-account. Without
+sharing, a second login means re-installing every skill and re-approving every
+MCP server — the accounts are the same person either way.
+
+So balance shares the second half, with no setup step. Launching an account
+merges whatever config it has accumulated up into `~/.balance/shared` and
+links it back down; each account joins the layer the first time you launch it,
+and later launches find the symlinks already there.
+
+```
+~/.balance/shared/
+  CLAUDE.md      user memory, @imported by each account's CLAUDE.md
+  settings.json  passed to Claude Code as --settings
+  mcp.json       passed to Claude Code as --mcp-config
+  projects.json  per-project MCP approvals and trust, carried between accounts
+  skills/        symlinked into every account dir
+  agents/          "
+  commands/        "
+  plugins/         "
+  memory/<project>/   symlinked in as projects/<project>/memory
+```
+
+`balance shared` shows what's in there and which accounts are linked to it.
+
+The mechanism differs per item because it has to. Directories are symlinked.
+Files Claude Code rewrites itself are not — an atomic write-and-rename
+replaces a symlink with a real file and silently un-shares it — so settings
+and MCP servers go in as launch flags, and user memory as an `@import` line
+that survives being rewritten.
+
+`.claude.json` gets a narrower treatment again. It holds account identity
+*and* the per-project state that decides whether a repo's `.mcp.json` servers
+come up at all (`enabledMcpjsonServers`, `hasTrustDialogAccepted`), so balance
+seeds just those keys before launch and reads back what the session decided
+after it exits. Approve a project's MCP servers once, in any account, and the
+rest inherit it.
+
+### How the merge resolves
+
+Adoption is entry by entry, so two accounts that both have config end up with
+the union of it: every skill, agent, command and marketplace either account
+had. Where they genuinely collide:
+
+- `MEMORY.md` indexes are unioned line by line.
+- `installed_plugins.json` and `known_marketplaces.json` are merged key by
+  key, and marketplace `installLocation` paths — which point at whichever
+  account dir installed them — are rewritten to the shared copy, so removing
+  that account doesn't break the marketplace for the others.
+- Anything left, like two different versions of the same skill, is parked at
+  `<account>/<dir>.pre-balance/…` rather than being merged or deleted. The
+  shared copy wins; yours is still on disk if you want it back.
+
+Nothing is deleted, and the whole thing is idempotent — a second launch of an
+account that's already linked walks a handful of `lstat` calls and stops.
+
+Opt out for one launch with `--no-shared`, or for good with
+`"shared": {"enabled": false}` in `config.json`; individual pieces have their
+own switches there too.
+
+**What this shares that you may not want shared**: trust dialogs. Accepting
+the trust prompt for a directory in one account accepts it for the others. Set
+`"projects": false` if you'd rather each account decide for itself.
+
 ## Config
 
 `~/.balance/config.json`:
@@ -116,6 +189,15 @@ back to the account dir. The fresh login lasts only for that session.
   "active": "work",
   "claude_binary": "claude",
   "log_level": "info",
+  "shared": {
+    "enabled": true,
+    "dirs": ["skills", "agents", "commands", "plugins"],
+    "mcp": true,
+    "strict_mcp": false,
+    "settings": true,
+    "memory": true,
+    "projects": true
+  },
   "accounts": [
     { "name": "work", "email": "mark@example.com", "last_used_at": 1788418333140, "added_at": 1788418275400 }
   ]
@@ -127,12 +209,37 @@ Each account's OAuth credentials live at `~/.balance/accounts/<name>/.credential
 Env overrides:
 - `BALANCE_CLAUDE_BINARY` — path to the `claude` executable (default: `claude` on PATH).
 - `BALANCE_LOG_LEVEL` — `debug | info | warn | error`.
+- `BALANCE_SHARED` — set to `0` to disable the shared config layer.
+- `BALANCE_HOME` — relocate everything balance owns (default: `~/.balance`). The test suite uses it to stay off your real config.
 
 ## Notes
 
 - **Passing args to Claude Code**: `balance run work -- --model opus --print "hello"` — everything after `--` is forwarded verbatim.
 - **Team plans**: Claude Code itself works on Team subscriptions. Non-Claude-Code agents (opencode, aider, Cline, etc.) via HTTP proxies do *not* — Anthropic's classifier routes tool-bearing requests to workspace extra-usage on Team plans regardless of how the proxy authenticates. See [Meridian issue #516](https://github.com/rynfar/meridian/issues/516). balance sidesteps this entirely by launching Claude Code itself, which is on the sanctioned path.
 - **Not a proxy**: balance v0.x was an Anthropic-API-compatible proxy that tried to pool subscriptions for third-party clients. That approach is fundamentally blocked on Team plans and got dropped in v1.0.0. Migration from an old `config.json` is automatic on first run.
+
+## Development
+
+```bash
+bun install
+bun run check     # typecheck + tests
+bun test          # just the tests
+bun run build     # dist/balance
+```
+
+The suite covers the parts with teeth: the merge that moves skills and plugin
+directories between accounts, the per-project MCP seeding and harvesting, the
+launch flags, and the Keychain blob merge. Every test runs against its own
+`BALANCE_HOME` under the system temp dir, so nothing can reach your real
+`~/.balance`, and the Keychain merge is tested as a pure function rather than
+against the real Keychain.
+
+CI runs typecheck, tests and a build on **self-hosted runners**, which means
+fork pull requests must never reach it — a fork's code would run on our own
+hardware. `.github/workflows/ci.yml` refuses any run whose repository isn't
+this one, or whose pull request comes from a fork. Keep the repo settings that
+back that up: *Settings > Actions > General >* require approval for outside
+collaborators, and scope the runner group to this repository only.
 
 ## Releasing
 
