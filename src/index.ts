@@ -9,6 +9,7 @@ import {
   runAccountSwitch,
   runRun,
   runSharedStatus,
+  runSharedSync,
   usage,
 } from "./cli";
 
@@ -70,7 +71,7 @@ async function main(): Promise<void> {
 
       // The shared config layer needs no setting up — this is just the view.
       case "shared":
-        process.exit(await runSharedStatus(rest));
+        process.exit(rest[0] === "sync" ? await runSharedSync(rest.slice(1)) : await runSharedStatus(rest));
         return;
 
       // Flat aliases matching the old (v0.x) CLI surface.

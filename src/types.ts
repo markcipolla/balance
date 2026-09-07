@@ -17,6 +17,8 @@ export interface SharedSettings {
   dirs: string[];      // subdirectories symlinked into every account (skills, agents, commands, plugins)
   mcp: boolean;        // pass shared/mcp.json via --mcp-config
   strict_mcp: boolean; // ...and --strict-mcp-config, ignoring every other MCP source
+  connectors: boolean; // hoist each account's claude.ai connectors into shared/mcp.json (implies strict_mcp)
+  connector_ttl_hours: number; // how stale an account's connector listing may get before a re-sync
   settings: boolean;   // pass shared/settings.json via --settings
   memory: boolean;     // symlink projects/<slug>/memory at the launch directory
   projects: boolean;   // carry per-project MCP approvals and trust between accounts

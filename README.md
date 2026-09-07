@@ -9,6 +9,7 @@ Pick a Claude account, launch Claude Code with it. Multiple Claude Code accounts
 - `balance run <name>` skips the picker.
 - `balance account add` runs the Claude OAuth flow and saves the resulting credentials into a new account dir. No `claude` install needed to add accounts.
 - The *configuration* half of an account dir — skills, agents, commands, plugins, MCP servers, settings, memory — is hoisted into one `~/.balance/shared` that every account launches with. Automatic; there is nothing to set up.
+- That includes **claude.ai connectors**, which live server-side rather than in any file: balance re-declares them as ordinary HTTP servers in the shared set, so every account launches with the same MCP servers. See [claude.ai connectors](#claudeai-connectors).
 
 Balance is a *launcher*, not a proxy. It sets `CLAUDE_CONFIG_DIR`, writes the account's credentials into the Keychain slot Claude Code TUI reads from (on macOS), and hands off to `claude`. Every request goes to the real, sanctioned Claude Code CLI — no request rewriting, no header spoofing, no compat surface to break.
 
@@ -86,6 +87,7 @@ balance account switch <name>                       set default account
 balance account remove <name>                       delete an account (removes credentials)
 
 balance shared                                      show what the shared config layer holds
+balance shared sync [<name>]                        re-read claude.ai connectors into the shared MCP set
 
 balance --help          full usage
 balance --version       print version
@@ -131,6 +133,7 @@ and later launches find the symlinks already there.
   CLAUDE.md      user memory, @imported by each account's CLAUDE.md
   settings.json  passed to Claude Code as --settings
   mcp.json       passed to Claude Code as --mcp-config
+  connectors.json  which servers in mcp.json came from a claude.ai connector
   projects.json  per-project MCP approvals and trust, carried between accounts
   skills/        symlinked into every account dir
   agents/          "
@@ -153,6 +156,50 @@ come up at all (`enabledMcpjsonServers`, `hasTrustDialogAccepted`), so balance
 seeds just those keys before launch and reads back what the session decided
 after it exits. Approve a project's MCP servers once, in any account, and the
 rest inherit it.
+
+### claude.ai connectors
+
+Connectors are the awkward case. Everything else in an account dir is a file
+balance can hoist; a claude.ai connector is resolved server-side from the OAuth
+identity and exists nowhere on disk. So two accounts see two different sets of
+MCP servers and there is no file to symlink to fix it.
+
+balance reads them out of the only interface that exposes them — `claude mcp
+list`, run per account — and re-declares each one in `shared/mcp.json` as an
+ordinary HTTP server, which is all a connector is underneath. The shared set is
+the **union across every account**: a connector enabled on one account is
+available from all of them.
+
+Because the account they came from would otherwise see each connector twice —
+once from the shared file, once from its own server-side set — turning this on
+implies `--strict-mcp-config`. That is what makes the set *one* set.
+
+Names are carried across verbatim. MCP OAuth tokens live in the Keychain blob
+balance already preserves between launches, so keeping the exact name is what
+lets an existing `claude mcp login` still match the re-declared server. On
+macOS that means one login per server, shared by every account; on Linux the
+token store is per-account, so logins stay per-account there.
+
+Syncing is automatic and paced. A cold start blocks — there is no shared set
+yet, so skipping it would launch with no MCP servers at all. After that a
+listing older than `connector_ttl_hours` (default 24) refreshes alongside the
+session rather than delaying it, and applies from the next launch. `balance
+shared sync [<name>]` forces it when you have just added a connector and don't
+want to wait.
+
+A connector is only retired from the shared set once it has disappeared from
+*every* account's last known listing — one account dropping it is not enough,
+since it may simply belong to another. Servers you wrote into `mcp.json` by
+hand are never touched.
+
+Strict mode would also hide a repo's own `.mcp.json`, which is a bad trade for
+a dev tool, so balance merges those back in itself — but only the servers the
+account has already approved. Passing the repo file through wholesale would
+grant the approval that the "use this repo's MCP servers?" prompt exists to
+withhold. The merged result is written to `<account>/balance-mcp.json` at
+launch and that is what `--mcp-config` gets.
+
+Set `"connectors": false` to leave each account with its own claude.ai set.
 
 ### How the merge resolves
 
@@ -194,6 +241,8 @@ the trust prompt for a directory in one account accepts it for the others. Set
     "dirs": ["skills", "agents", "commands", "plugins"],
     "mcp": true,
     "strict_mcp": false,
+    "connectors": true,
+    "connector_ttl_hours": 24,
     "settings": true,
     "memory": true,
     "projects": true

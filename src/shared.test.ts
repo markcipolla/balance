@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   adoptAccount,
   applySharedLayer,
+  buildLaunchMcpConfig,
   harvestProjectState,
   initShared,
   linkReport,
@@ -19,6 +20,7 @@ import {
   sharedMemoryPath,
   sharedProjectsPath,
   sharedSettingsPath,
+  strictMcp,
 } from "./shared";
 import type { SharedSettings } from "./types";
 
@@ -29,6 +31,8 @@ const SETTINGS: SharedSettings = {
   dirs: DIRS,
   mcp: true,
   strict_mcp: false,
+  connectors: false,
+  connector_ttl_hours: 24,
   settings: true,
   memory: true,
   projects: true,
@@ -446,6 +450,108 @@ describe("sharedLaunchArgs", () => {
 
   test("emits nothing before the shared files exist", () => {
     expect(sharedLaunchArgs(SETTINGS, [])).toEqual([]);
+  });
+});
+
+describe("strictMcp", () => {
+  test("off by default", () => {
+    expect(strictMcp(SETTINGS)).toBe(false);
+  });
+
+  test("connector sync implies it — otherwise the source account sees doubles", () => {
+    expect(strictMcp({ ...SETTINGS, connectors: true })).toBe(true);
+  });
+
+  test("sharedLaunchArgs follows the implication", async () => {
+    await initShared(DIRS);
+    expect(sharedLaunchArgs({ ...SETTINGS, connectors: true }, [])).toEqual([
+      "--mcp-config",
+      sharedMcpPath(),
+      "--strict-mcp-config",
+    ]);
+  });
+
+  test("an explicit --mcp-config path replaces the shared one", async () => {
+    await initShared(DIRS);
+    await write(join(home, "merged.json"), "{}");
+    expect(sharedLaunchArgs(SETTINGS, [], join(home, "merged.json"))).toEqual([
+      "--mcp-config",
+      join(home, "merged.json"),
+    ]);
+  });
+});
+
+describe("buildLaunchMcpConfig", () => {
+  const STRICT: SharedSettings = { ...SETTINGS, connectors: true };
+
+  async function repo(servers: Record<string, unknown>): Promise<string> {
+    const cwd = join(home, "repo");
+    await writeJson(join(cwd, ".mcp.json"), { mcpServers: servers });
+    return cwd;
+  }
+
+  test("returns null when strict mode is off — other sources still load normally", async () => {
+    await initShared(DIRS);
+    expect(await buildLaunchMcpConfig(accountPath("work"), home, SETTINGS)).toBeNull();
+  });
+
+  test("returns null when MCP sharing is off entirely", async () => {
+    await initShared(DIRS);
+    expect(await buildLaunchMcpConfig(accountPath("work"), home, { ...STRICT, mcp: false })).toBeNull();
+  });
+
+  test("writes the shared servers into the account dir", async () => {
+    await initShared(DIRS);
+    await writeJson(sharedMcpPath(), { mcpServers: { "claude.ai Linear": { type: "http", url: "https://x/mcp" } } });
+    const path = await buildLaunchMcpConfig(accountPath("work"), home, STRICT);
+    expect(path).toBe(join(accountPath("work"), "balance-mcp.json"));
+    // Not toHaveProperty: it reads dots in the key as a path, and every
+    // connector name has one.
+    expect(Object.keys((await readJson(path!)).mcpServers)).toEqual(["claude.ai Linear"]);
+  });
+
+  test("merges in a project server the account has approved", async () => {
+    await initShared(DIRS);
+    await writeJson(sharedMcpPath(), { mcpServers: {} });
+    const dir = accountPath("work");
+    const cwd = await repo({ "repo-server": { type: "http", url: "https://repo/mcp" } });
+    await writeJson(join(dir, ".claude.json"), {
+      projects: { [cwd]: { enabledMcpjsonServers: ["repo-server"] } },
+    });
+    const path = await buildLaunchMcpConfig(dir, cwd, STRICT);
+    expect((await readJson(path!)).mcpServers).toHaveProperty("repo-server");
+  });
+
+  test("holds back a project server that was never approved", async () => {
+    await initShared(DIRS);
+    await writeJson(sharedMcpPath(), { mcpServers: {} });
+    const dir = accountPath("work");
+    const cwd = await repo({ "repo-server": { type: "http", url: "https://repo/mcp" } });
+    // No .claude.json entry at all: the approval prompt has never been answered,
+    // and strict mode must not answer it for the user.
+    const path = await buildLaunchMcpConfig(dir, cwd, STRICT);
+    expect((await readJson(path!)).mcpServers).toEqual({});
+  });
+
+  test("respects an explicit disable", async () => {
+    await initShared(DIRS);
+    await writeJson(sharedMcpPath(), { mcpServers: {} });
+    const dir = accountPath("work");
+    const cwd = await repo({ "repo-server": { type: "http", url: "https://repo/mcp" } });
+    await writeJson(join(dir, ".claude.json"), {
+      projects: { [cwd]: { enabledMcpjsonServers: ["repo-server"], disabledMcpjsonServers: ["repo-server"] } },
+    });
+    expect((await readJson((await buildLaunchMcpConfig(dir, cwd, STRICT))!)).mcpServers).toEqual({});
+  });
+
+  test("the shared layer wins a name collision with the repo", async () => {
+    await initShared(DIRS);
+    await writeJson(sharedMcpPath(), { mcpServers: { dup: { type: "http", url: "https://shared/mcp" } } });
+    const dir = accountPath("work");
+    const cwd = await repo({ dup: { type: "http", url: "https://repo/mcp" } });
+    await writeJson(join(dir, ".claude.json"), { projects: { [cwd]: { enabledMcpjsonServers: ["dup"] } } });
+    const merged = await readJson((await buildLaunchMcpConfig(dir, cwd, STRICT))!);
+    expect(merged.mcpServers.dup.url).toBe("https://shared/mcp");
   });
 });
 
