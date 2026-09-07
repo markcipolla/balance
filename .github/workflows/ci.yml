@@ -32,11 +32,6 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 15
 
-    env:
-      # Keep the suite off the runner's real ~/.balance. Individual tests set
-      # this per-case as well; this is the backstop for anything that forgets.
-      BALANCE_HOME: ${{ runner.temp }}/balance-home
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,6 +52,11 @@ jobs:
         run: bun run typecheck
 
       - name: Test
+        # Keep the suite off the runner's real ~/.balance. Individual tests set
+        # this per-case as well; this is the backstop for anything that forgets.
+        # (Step-level, because the runner context isn't available to job env.)
+        env:
+          BALANCE_HOME: ${{ runner.temp }}/balance-home
         run: bun test
 
       # The release workflow is tag-triggered and has no gate of its own, so a
