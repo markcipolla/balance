@@ -1,6 +1,7 @@
-import { chmodSync, existsSync, lstatSync, readlinkSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { readJson, writeJson } from "./jsonfile";
 import { accountDir, baseDir } from "./paths";
 import { log } from "./log";
 import type { SharedSettings } from "./types";
@@ -44,6 +45,13 @@ export function sharedProjectsPath(): string {
   return join(sharedDir(), "projects.json");
 }
 
+// Bookkeeping for the connector sync: which servers in mcp.json balance put
+// there, and when each account was last listed. Kept beside mcp.json rather
+// than inside it, because that file has to stay a config Claude Code accepts.
+export function connectorStatePath(): string {
+  return join(sharedDir(), "connectors.json");
+}
+
 export function sharedMemoryDir(): string {
   return join(sharedDir(), "memory");
 }
@@ -58,26 +66,6 @@ export function sharedActive(s: SharedSettings): boolean {
 }
 
 // ---------- small fs helpers ----------
-
-async function writeJson(path: string, value: unknown, mode?: number): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const tmp = path + ".tmp";
-  await writeFile(tmp, JSON.stringify(value, null, 2) + "\n", "utf8");
-  await rename(tmp, path);
-  if (mode !== undefined) {
-    try { chmodSync(path, mode); } catch { /* best-effort */ }
-  }
-}
-
-async function readJson<T>(path: string): Promise<T | null> {
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(await readFile(path, "utf8")) as T;
-  } catch (err) {
-    log.warn("could not parse JSON — ignoring it", { path, err: String(err) });
-    return null;
-  }
-}
 
 function linkState(path: string): "missing" | "symlink" | "real" {
   try {
@@ -171,6 +159,15 @@ export async function applySharedLayer(dir: string, cwd: string, s: SharedSettin
   return report;
 }
 
+// Hoisting claude.ai connectors only produces *one* set of MCP servers if each
+// account's own server-side set is suppressed — otherwise the account they were
+// read from sees each connector twice, once from the shared file and once from
+// itself. So turning connector sync on implies --strict-mcp-config; the setting
+// stays separate because strict mode is still worth having on its own.
+export function strictMcp(s: SharedSettings): boolean {
+  return s.strict_mcp || s.connectors;
+}
+
 // Flags that put the shared MCP servers and settings in front of Claude Code
 // without writing them into the account's .claude.json — which is also where
 // account identity lives, and which Claude Code rewrites from under us.
@@ -178,16 +175,64 @@ export async function applySharedLayer(dir: string, cwd: string, s: SharedSettin
 // Appended *after* the caller's own args: --mcp-config is variadic, so with
 // nothing following it, it can't swallow a forwarded prompt. Anything the
 // caller passed explicitly wins outright.
-export function sharedLaunchArgs(s: SharedSettings, forwarded: string[]): string[] {
+export function sharedLaunchArgs(s: SharedSettings, forwarded: string[], mcpConfigPath?: string): string[] {
   const out: string[] = [];
-  if (s.mcp && existsSync(sharedMcpPath()) && !forwarded.includes("--mcp-config")) {
-    out.push("--mcp-config", sharedMcpPath());
-    if (s.strict_mcp && !forwarded.includes("--strict-mcp-config")) out.push("--strict-mcp-config");
+  const mcpPath = mcpConfigPath ?? sharedMcpPath();
+  if (s.mcp && existsSync(mcpPath) && !forwarded.includes("--mcp-config")) {
+    out.push("--mcp-config", mcpPath);
+    if (strictMcp(s) && !forwarded.includes("--strict-mcp-config")) out.push("--strict-mcp-config");
   }
   if (s.settings && existsSync(sharedSettingsPath()) && !forwarded.includes("--settings")) {
     out.push("--settings", sharedSettingsPath());
   }
   return out;
+}
+
+// The file actually handed to --mcp-config once strict mode is in play.
+// Written into the account dir, not the shared layer: it is derived, per
+// launch, and depends on where you launched from.
+export function launchMcpConfigPath(dir: string): string {
+  return join(dir, "balance-mcp.json");
+}
+
+// --strict-mcp-config makes Claude Code ignore every MCP source except the
+// file we name — including the .mcp.json a repo ships. Buying one shared set
+// of connectors at the price of never loading a project's own servers is a bad
+// trade for a dev tool, so we merge them back in ourselves.
+//
+// Only the servers this account has already approved, though. Passing the repo
+// file through wholesale would hand it the approval that the "use this repo's
+// MCP servers?" prompt exists to withhold, which would turn strict mode into a
+// way for any cloned repo to get its servers loaded unasked.
+export async function buildLaunchMcpConfig(dir: string, cwd: string, s: SharedSettings): Promise<string | null> {
+  // Without strict mode the repo's own file is still loaded by Claude Code the
+  // normal way, prompt and all — nothing to merge, and nothing to write.
+  if (!s.mcp || !strictMcp(s)) return null;
+  const shared = await readJson<{ mcpServers?: Record<string, unknown> }>(sharedMcpPath());
+  if (!shared) return null;
+  const servers: Record<string, unknown> = { ...(shared.mcpServers ?? {}) };
+
+  const repo = await readJson<{ mcpServers?: Record<string, unknown> }>(join(cwd, ".mcp.json"));
+  if (repo?.mcpServers) {
+    const project = (await readJson<ClaudeJson>(claudeJsonPath(dir)))?.projects?.[cwd];
+    const enabled = new Set(project?.enabledMcpjsonServers ?? []);
+    const disabled = new Set(project?.disabledMcpjsonServers ?? []);
+    let merged = 0;
+    for (const [name, def] of Object.entries(repo.mcpServers)) {
+      if (!enabled.has(name) || disabled.has(name)) continue;
+      if (name in servers) continue; // the shared layer wins a name collision
+      servers[name] = def;
+      merged += 1;
+    }
+    const held = Object.keys(repo.mcpServers).length - merged;
+    if (held > 0) {
+      log.info("not loading unapproved project MCP servers", { cwd, count: held });
+    }
+  }
+
+  const path = launchMcpConfigPath(dir);
+  await writeJson(path, { mcpServers: servers }, 0o600);
+  return path;
 }
 
 // ---------- per-project approval state ----------

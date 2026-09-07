@@ -11,6 +11,8 @@ const SHARED_DEFAULTS: SharedSettings = {
   dirs: ["skills", "agents", "commands", "plugins"],
   mcp: true,
   strict_mcp: false,
+  connectors: true,
+  connector_ttl_hours: 24,
   settings: true,
   memory: true,
   projects: true,

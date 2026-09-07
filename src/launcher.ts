@@ -1,9 +1,18 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { basename } from "node:path";
 import { readCredentials, writeCredentials, type ClaudeCredentials } from "./credentials";
 import { refreshAccessToken } from "./oauth";
 import { writeKeychainCreds, isMac } from "./keychain";
-import { applySharedLayer, harvestProjectState, sharedActive, sharedDir, sharedLaunchArgs } from "./shared";
+import {
+  applySharedLayer,
+  buildLaunchMcpConfig,
+  harvestProjectState,
+  sharedActive,
+  sharedDir,
+  sharedLaunchArgs,
+} from "./shared";
+import { isSyncStale, needsColdSync, syncConnectors } from "./connectors";
 import type { SharedSettings } from "./types";
 import { log } from "./log";
 
@@ -32,6 +41,31 @@ async function loadFreshCredentials(accountDir: string): Promise<ClaudeCredentia
   } catch (err) {
     log.warn("token refresh failed — Claude Code may prompt for a fresh login", { err: String(err) });
     return creds; // return stale creds; Claude Code will surface the auth error
+  }
+}
+
+// Keep the shared connector set current without making every launch wait on a
+// network round-trip.
+//
+// A cold start has to block: the shared file holds no connectors yet, so
+// skipping the sync would launch this session with no MCP servers at all. Once
+// there is a usable set, a stale listing refreshes alongside the session
+// instead — mcp.json has already been read by the time it lands, so the result
+// applies from the next launch, which is soon enough for a list that changes
+// about never.
+async function refreshConnectors(dir: string, shared: SharedSettings, binary: string): Promise<void> {
+  try {
+    if (await needsColdSync()) {
+      log.info("reading claude.ai connectors into the shared layer — first run, this takes a moment");
+      await syncConnectors(dir, binary);
+      return;
+    }
+    if (!(await isSyncStale(basename(dir), shared.connector_ttl_hours))) return;
+    void syncConnectors(dir, binary).catch((err: unknown) => {
+      log.debug("background connector sync failed", { err: String(err) });
+    });
+  } catch (err) {
+    log.warn("could not sync claude.ai connectors — using the shared set as-is", { err: String(err) });
   }
 }
 
@@ -90,7 +124,11 @@ export async function launchClaudeCode(
       for (const path of report.setAside) {
         log.warn("kept a conflicting copy instead of merging it", { path });
       }
-      args = [...extraArgs, ...sharedLaunchArgs(shared, extraArgs)];
+      if (shared.connectors) await refreshConnectors(claudeConfigDir, shared, binary);
+      // Null unless strict mode is on, in which case this is shared/mcp.json
+      // plus whatever the project has already been approved for.
+      const mcpConfig = await buildLaunchMcpConfig(claudeConfigDir, cwd, shared);
+      args = [...extraArgs, ...sharedLaunchArgs(shared, extraArgs, mcpConfig ?? undefined)];
     } catch (err) {
       log.warn("could not apply the shared config layer — launching without it", { err: String(err) });
     }
