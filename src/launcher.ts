@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { readCredentials, writeCredentials, type ClaudeCredentials } from "./credentials";
 import { refreshAccessToken } from "./oauth";
 import { writeKeychainCreds, isMac } from "./keychain";
-import { applySharedLayer, harvestProjectState, sharedActive, sharedLaunchArgs } from "./shared";
+import { applySharedLayer, harvestProjectState, sharedActive, sharedDir, sharedLaunchArgs } from "./shared";
 import type { SharedSettings } from "./types";
 import { log } from "./log";
 
@@ -82,7 +82,14 @@ export async function launchClaudeCode(
   let args = extraArgs;
   if (useShared) {
     try {
-      await applySharedLayer(claudeConfigDir, cwd, shared);
+      const report = await applySharedLayer(claudeConfigDir, cwd, shared);
+      // Only the first launch of an account has anything to say here.
+      if (report.adopted.length > 0) {
+        log.info(`hoisted into ${sharedDir()}: ${report.adopted.join(", ")}`);
+      }
+      for (const path of report.setAside) {
+        log.warn("kept a conflicting copy instead of merging it", { path });
+      }
       args = [...extraArgs, ...sharedLaunchArgs(shared, extraArgs)];
     } catch (err) {
       log.warn("could not apply the shared config layer — launching without it", { err: String(err) });

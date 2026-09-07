@@ -13,17 +13,12 @@ import {
 } from "./config";
 import { accountDir, defaultConfigPath } from "./paths";
 import {
-  LINKABLE_DIRS,
-  adoptFrom,
-  applySharedLayer,
-  initShared,
-  linkAllProjectMemory,
   linkReport,
   sharedActive,
   sharedDir,
   sharedMcpPath,
-  sharedSettingsPath,
   sharedMemoryPath,
+  sharedSettingsPath,
 } from "./shared";
 import { writeCredentials } from "./credentials";
 import { runOAuthLogin } from "./login";
@@ -235,89 +230,34 @@ export async function runRun(args: string[]): Promise<number> {
   return 0; // never reached — launcher takes over the process
 }
 
-// ---------- shared: init / link / status ----------
-
-async function eachAccount(cfg: Config, fn: (a: Account) => Promise<void>): Promise<void> {
-  for (const a of cfg.accounts) {
-    if (!existsSync(accountDir(a.name))) continue;
-    await fn(a);
-  }
-}
-
-export async function runSharedInit(args: string[]): Promise<number> {
-  const configPath = configPathOf(args);
-  const cfg = await loadOrEmpty(configPath);
-  const from = flag(args, "--from");
-  if (from && !findAccount(cfg, from)) {
-    console.error(`No account named "${from}".`);
-    return 1;
-  }
-
-  const existed = existsSync(sharedDir());
-  await initShared(cfg.shared.dirs);
-  console.log(`${existed ? "Shared config layer at" : "Created shared config layer at"} ${bold(sharedDir())}`);
-
-  if (from) {
-    const report = await adoptFrom(from, cfg.shared.dirs);
-    if (report.moved.length === 0 && report.copied.length === 0) {
-      console.log(dim(`Nothing to adopt from "${from}" — it has no config of its own yet.`));
-    } else {
-      console.log(`\nAdopted from ${bold(from)}:`);
-      for (const m of report.moved) console.log(`  ${green("→")} ${m} ${dim("moved")}`);
-      for (const c of report.copied) console.log(`  ${green("→")} ${c} ${dim("copied")}`);
-    }
-    for (const s of report.skipped) console.log(`  ${yellow("⚠")} kept ${s}`);
-  }
-
-  await runSharedLink(args);
-  return 0;
-}
-
-export async function runSharedLink(args: string[]): Promise<number> {
-  const configPath = configPathOf(args);
-  const cfg = await loadOrEmpty(configPath);
-  if (!existsSync(sharedDir())) {
-    console.error("No shared layer yet. Create one with: balance shared init");
-    return 1;
-  }
-  const force = args.includes("--force");
-  console.log(`\nLinking accounts to ${dim(sharedDir())}${force ? yellow(" (--force: existing copies moved to <name>.pre-balance)") : ""}`);
-  await eachAccount(cfg, async (a) => {
-    const dir = accountDir(a.name);
-    // cwd here is just "some project" — the per-project bits are linked for
-    // every slug the shared layer knows, not only the one we're standing in.
-    await applySharedLayer(dir, process.cwd(), { ...cfg.shared, memory: false, projects: false }, force);
-    const memories = cfg.shared.memory ? await linkAllProjectMemory(dir, force) : 0;
-    const states = linkReport(dir, cfg.shared.dirs)
-      .map((r) => `${r.name}: ${r.state === "shared" ? green(r.state) : r.state === "own copy" ? yellow(r.state) : dim(r.state)}`)
-      .join("  ");
-    console.log(`  ${bold(a.name)}  ${states}${cfg.shared.memory ? dim(`  memory: ${memories} project(s)`) : ""}`);
-  });
-  console.log(dim("\n'own copy' means a real directory is in the way — re-run with --force to move it aside and link."));
-  return 0;
-}
+// ---------- shared: status ----------
 
 export async function runSharedStatus(args: string[]): Promise<number> {
   const configPath = configPathOf(args);
   const cfg = await loadOrEmpty(configPath);
   if (!sharedActive(cfg.shared)) {
-    console.log(`Shared config layer: ${yellow(existsSync(sharedDir()) ? "disabled in config.json" : "not set up")}`);
-    console.log(dim("Create it with: balance shared init [--from <account>]"));
+    console.log(`Shared config layer: ${yellow("disabled")} ${dim("(\"shared\": {\"enabled\": false} in config.json)")}`);
     return 0;
   }
-  console.log(`Shared config layer: ${green("active")}  ${dim(sharedDir())}\n`);
+  if (!existsSync(sharedDir())) {
+    console.log(`Shared config layer: ${green("on")} ${dim("— nothing hoisted yet; it fills up as you launch each account")}`);
+    return 0;
+  }
+  console.log(`Shared config layer: ${green("on")}  ${dim(sharedDir())}\n`);
   const flags: string[] = [];
   if (cfg.shared.mcp && existsSync(sharedMcpPath())) flags.push(`--mcp-config${cfg.shared.strict_mcp ? " --strict-mcp-config" : ""}`);
   if (cfg.shared.settings && existsSync(sharedSettingsPath())) flags.push("--settings");
   console.log(`  launch flags   ${flags.length > 0 ? flags.join(" ") : dim("none")}`);
   console.log(`  user memory    ${existsSync(sharedMemoryPath()) ? green("shared/CLAUDE.md (imported per account)") : dim("—")}`);
   console.log(`  project state  ${cfg.shared.projects ? green("MCP approvals + trust carried between accounts") : dim("off")}\n`);
-  await eachAccount(cfg, async (a) => {
+  for (const a of cfg.accounts) {
+    if (!existsSync(accountDir(a.name))) continue;
     const states = linkReport(accountDir(a.name), cfg.shared.dirs)
       .map((r) => `${r.name}: ${r.state === "shared" ? green(r.state) : r.state === "own copy" ? yellow(r.state) : dim(r.state)}`)
       .join("  ");
     console.log(`  ${bold(a.name)}  ${states}`);
-  });
+  }
+  console.log(dim("\nAn account joins the layer the next time you launch it."));
   return 0;
 }
 
@@ -336,9 +276,7 @@ usage:
   balance account switch <name>                       change default account
   balance account remove <name>                       delete an account (removes credentials on disk)
 
-  balance shared init   [--from <account>]            hoist config out of the account dirs into ~/.balance/shared
-  balance shared link   [--force]                     (re)link every account to the shared layer
-  balance shared status                               show what is shared and which accounts are linked
+  balance shared                                      show what the shared config layer holds
 
 flags:
   --config <path>   config file (default: ~/.balance/config.json)
@@ -355,9 +293,9 @@ account, balance launches Claude Code with CLAUDE_CONFIG_DIR pointed at
 that directory, so it signs in as that account without touching your
 machine's default ~/.claude.
 
-Identity stays per-account; configuration does not have to. 'balance shared
-init' lifts skills, agents, commands, plugins, MCP servers, settings and
-memory into ~/.balance/shared, and every launch pushes that one copy back
-down into whichever account you picked.
+Identity stays per-account; configuration does not have to. Skills, agents,
+commands, plugins, MCP servers, settings and memory are hoisted into one
+~/.balance/shared as each account is launched, and pushed back down into
+whichever account you pick. No setup — 'balance shared' shows the result.
 `;
 }

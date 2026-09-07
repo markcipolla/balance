@@ -8,8 +8,6 @@ import {
   runAccountRemove,
   runAccountSwitch,
   runRun,
-  runSharedInit,
-  runSharedLink,
   runSharedStatus,
   usage,
 } from "./cli";
@@ -27,13 +25,6 @@ const ACCOUNT_TREE: Node = {
   rm: runAccountRemove,
   switch: runAccountSwitch,
   use: runAccountSwitch,
-};
-
-const SHARED_TREE: Node = {
-  init: runSharedInit,
-  link: runSharedLink,
-  relink: runSharedLink,
-  status: runSharedStatus,
 };
 
 async function walk(node: Node, path: string[], args: string[]): Promise<number> {
@@ -77,8 +68,9 @@ async function main(): Promise<void> {
         process.exit(await walk(ACCOUNT_TREE, ["account"], rest));
         return;
 
+      // The shared config layer needs no setting up — this is just the view.
       case "shared":
-        process.exit(await walk(SHARED_TREE, ["shared"], rest));
+        process.exit(await runSharedStatus(rest));
         return;
 
       // Flat aliases matching the old (v0.x) CLI surface.

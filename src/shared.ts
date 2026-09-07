@@ -54,7 +54,7 @@ export function sharedMemoryDir(): string {
 export const LINKABLE_DIRS = ["skills", "agents", "commands", "plugins"] as const;
 
 export function sharedActive(s: SharedSettings): boolean {
-  return s.enabled && existsSync(sharedDir());
+  return s.enabled;
 }
 
 // ---------- small fs helpers ----------
@@ -87,24 +87,18 @@ function linkState(path: string): "missing" | "symlink" | "real" {
   }
 }
 
-// Point `link` at `target`. Non-destructive by design: a real file or
-// directory already sitting there is left alone and reported, because it may
-// be the only copy of someone's skills. `balance shared link --force` is the
-// explicit opt-in that moves it aside.
-async function linkInto(link: string, target: string, force = false): Promise<boolean> {
+// Point `link` at `target`. Anything real still sitting there has already
+// been merged into the shared copy by adoptAccount, so reaching this with a
+// real path means the merge left something behind — say so rather than
+// clobber it.
+async function linkInto(link: string, target: string): Promise<boolean> {
   const state = linkState(link);
   if (state === "symlink") {
     if (readlinkSync(link) === target) return true;
     await rm(link, { force: true });
   } else if (state === "real") {
-    if (!force) {
-      log.warn("not linking — something real is already there", { path: link });
-      return false;
-    }
-    const aside = `${link}.pre-balance`;
-    await rm(aside, { recursive: true, force: true });
-    await rename(link, aside);
-    log.info("moved existing path aside", { from: link, to: aside });
+    log.warn("not linking — something real is still there", { path: link });
+    return false;
   }
   await mkdir(dirname(link), { recursive: true });
   await symlink(target, link, "dir");
@@ -143,24 +137,38 @@ async function ensureMemoryImport(dir: string): Promise<void> {
 // The memory tool writes to projects/<slug>/memory, so sharing it means
 // linking that one subdirectory — not the whole projects/ dir, which also
 // holds session transcripts we deliberately keep per-account.
-async function linkProjectMemory(dir: string, cwd: string, force = false): Promise<void> {
+async function linkProjectMemory(dir: string, cwd: string): Promise<void> {
   const slug = projectSlug(cwd);
   const target = join(sharedMemoryDir(), slug);
   await mkdir(target, { recursive: true });
   await mkdir(join(dir, "projects", slug), { recursive: true });
-  await linkInto(join(dir, "projects", slug, "memory"), target, force);
+  await linkInto(join(dir, "projects", slug, "memory"), target);
 }
 
-export async function applySharedLayer(dir: string, cwd: string, s: SharedSettings, force = false): Promise<void> {
-  for (const name of LINKABLE_DIRS) {
-    if (!s.dirs.includes(name)) continue;
+// Everything the shared layer does to an account dir, on every launch.
+//
+// There is no setup step: the first launch of each account merges whatever
+// config that account has accumulated up into ~/.balance/shared and links it
+// back down, so an account joins the layer simply by being launched. Later
+// launches find symlinks already in place and do almost nothing.
+export async function applySharedLayer(dir: string, cwd: string, s: SharedSettings): Promise<AdoptReport> {
+  await initShared(s.dirs);
+  const report = await adoptAccount(dir, s.dirs);
+
+  for (const name of s.dirs) {
     const target = join(sharedDir(), name);
     if (!existsSync(target)) continue;
-    await linkInto(join(dir, name), target, force);
+    await linkInto(join(dir, name), target);
   }
   await ensureMemoryImport(dir);
-  if (s.memory) await linkProjectMemory(dir, cwd, force);
+  if (s.memory) {
+    // Every project the layer knows about, not just this one — an account
+    // that has never been in a project still inherits its memory.
+    await linkAllProjectMemory(dir);
+    await linkProjectMemory(dir, cwd);
+  }
   if (s.projects) await seedProjectState(dir, cwd);
+  return report;
 }
 
 // Flags that put the shared MCP servers and settings in front of Claude Code
@@ -284,12 +292,11 @@ export async function harvestProjectState(dir: string, cwd: string): Promise<voi
   log.debug("harvested project state into the shared layer", { cwd });
 }
 
-// ---------- init / adopt ----------
+// ---------- adoption ----------
 
 export interface AdoptReport {
-  moved: string[];
-  copied: string[];
-  skipped: string[];
+  adopted: string[];   // what moved up into the shared layer
+  setAside: string[];  // colliding copies parked next to the account dir
 }
 
 // Create the shared skeleton. Empty dirs are intentional: they're what makes a
@@ -300,63 +307,172 @@ export async function initShared(dirs: readonly string[]): Promise<void> {
   if (!existsSync(sharedMcpPath())) await writeJson(sharedMcpPath(), { mcpServers: {} });
 }
 
-// Lift one account's config into the shared dir, so the hoist starts from a
-// real setup instead of an empty one. Directories move (the account gets a
-// symlink back in applySharedLayer); files are copied, since the account keeps
-// needing its own copy.
-export async function adoptFrom(name: string, dirs: readonly string[]): Promise<AdoptReport> {
-  const dir = accountDir(name);
-  const report: AdoptReport = { moved: [], copied: [], skipped: [] };
+// How deep the merge walks before it stops trying to reconcile and parks the
+// whole subtree instead. Two levels covers skills/<skill>/, plugins/cache/<x>,
+// plugins/marketplaces/<name>; going deeper would mean walking a cloned
+// marketplace repo file by file on every first launch, for no benefit — a
+// colliding marketplace is the same public repo in both accounts.
+const MERGE_DEPTH = 2;
+
+// Files worth reconciling rather than picking a winner for.
+const MEMORY_INDEX = "MEMORY.md";
+const JSON_MANIFESTS = new Set(["installed_plugins.json", "known_marketplaces.json"]);
+
+async function isEmptyDir(path: string): Promise<boolean> {
+  try {
+    return (await readdir(path)).length === 0;
+  } catch {
+    return true;
+  }
+}
+
+// Park a path next to the account dir instead of deleting it. Never overwrites
+// an earlier parked copy.
+async function setAside(from: string, aside: string, report: AdoptReport): Promise<void> {
+  let dest = aside;
+  for (let n = 2; existsSync(dest); n += 1) dest = `${aside}.${n}`;
+  await mkdir(dirname(dest), { recursive: true });
+  await rename(from, dest);
+  report.setAside.push(dest);
+}
+
+// MEMORY.md is a flat list of pointers, one per memory — two accounts' indexes
+// union cleanly, which is the whole point of sharing memory in the first place.
+async function mergeMemoryIndex(from: string, to: string): Promise<void> {
+  const existing = (await readFile(to, "utf8")).split("\n");
+  const incoming = (await readFile(from, "utf8")).split("\n");
+  const seen = new Set(existing.map((l) => l.trim()));
+  const added = incoming.filter((l) => l.trim().length > 0 && !seen.has(l.trim()));
+  if (added.length > 0) {
+    const body = existing.join("\n").replace(/\n+$/, "");
+    await writeFile(to, `${body}\n${added.join("\n")}\n`, "utf8");
+  }
+  await rm(from, { force: true });
+}
+
+function mergeJsonValues(mine: unknown, theirs: unknown): unknown {
+  if (Array.isArray(mine) && Array.isArray(theirs)) return [...new Set([...mine, ...theirs])];
+  if (mine && theirs && typeof mine === "object" && typeof theirs === "object" && !Array.isArray(mine) && !Array.isArray(theirs)) {
+    const out: Record<string, unknown> = { ...(mine as Record<string, unknown>) };
+    for (const [k, v] of Object.entries(theirs as Record<string, unknown>)) {
+      out[k] = k in out ? mergeJsonValues(out[k], v) : v;
+    }
+    return out;
+  }
+  return mine; // scalar conflict: the shared copy already won
+}
+
+async function mergeJsonManifest(from: string, to: string): Promise<void> {
+  const mine = await readJson<unknown>(to);
+  const theirs = await readJson<unknown>(from);
+  if (mine !== null && theirs !== null) await writeJson(to, mergeJsonValues(mine, theirs));
+  await rm(from, { force: true });
+}
+
+// Merge `from` into `to` entry by entry. Anything `to` doesn't have moves
+// across; anything it does have is reconciled where that's meaningful, and
+// parked otherwise. Nothing is ever deleted except a file we just merged.
+async function mergeInto(from: string, to: string, aside: string, report: AdoptReport, depth = 0): Promise<void> {
+  for (const entry of await readdir(from)) {
+    const src = join(from, entry);
+    const dest = join(to, entry);
+    if (!existsSync(dest)) {
+      await mkdir(dirname(dest), { recursive: true });
+      await rename(src, dest);
+      continue;
+    }
+    if (entry === MEMORY_INDEX) {
+      await mergeMemoryIndex(src, dest);
+      continue;
+    }
+    if (JSON_MANIFESTS.has(entry)) {
+      await mergeJsonManifest(src, dest);
+      continue;
+    }
+    const bothDirs = lstatSync(src).isDirectory() && lstatSync(dest).isDirectory();
+    if (bothDirs && depth < MERGE_DEPTH) {
+      await mergeInto(src, dest, join(aside, entry), report, depth + 1);
+      if (await isEmptyDir(src)) await rm(src, { recursive: true, force: true });
+      continue;
+    }
+    await setAside(src, join(aside, entry), report);
+  }
+}
+
+// Marketplace install locations are stored as absolute paths into whichever
+// account dir installed them. Once the directory itself is shared, point them
+// at the shared copy — otherwise removing that one account breaks the
+// marketplace for every other account.
+async function fixMarketplaceLocations(): Promise<void> {
+  const path = join(sharedDir(), "plugins", "known_marketplaces.json");
+  const known = await readJson<Record<string, { installLocation?: string }>>(path);
+  if (!known) return;
+  let changed = false;
+  for (const [name, entry] of Object.entries(known)) {
+    const shared = join(sharedDir(), "plugins", "marketplaces", name);
+    if (!existsSync(shared) || entry.installLocation === shared) continue;
+    entry.installLocation = shared;
+    changed = true;
+  }
+  if (changed) await writeJson(path, known);
+}
+
+// Merge one account's own config up into the shared layer. Idempotent: an
+// account whose paths are already symlinks has nothing left to adopt, so
+// every launch after the first walks a handful of lstat calls and stops.
+export async function adoptAccount(dir: string, dirs: readonly string[]): Promise<AdoptReport> {
+  const report: AdoptReport = { adopted: [], setAside: [] };
 
   for (const sub of dirs) {
     const from = join(dir, sub);
-    const to = join(sharedDir(), sub);
     if (linkState(from) !== "real") continue;
-    if (existsSync(to) && (await readdir(to)).length > 0) {
-      report.skipped.push(`${sub}/ (shared copy is not empty)`);
-      continue;
+    const to = join(sharedDir(), sub);
+    await mkdir(to, { recursive: true });
+    await mergeInto(from, to, `${from}.pre-balance`, report);
+    if (await isEmptyDir(from)) {
+      await rm(from, { recursive: true, force: true });
+      report.adopted.push(`${sub}/`);
     }
-    await rm(to, { recursive: true, force: true });
-    await rename(from, to);
-    report.moved.push(`${sub}/`);
   }
+  if (report.adopted.includes("plugins/")) await fixMarketplaceLocations();
 
   for (const [file, target] of [["CLAUDE.md", sharedMemoryPath()], ["settings.json", sharedSettingsPath()]] as const) {
     const from = join(dir, file);
+    // The account keeps its own copy of both — user memory gains an @import
+    // line, and settings.json stays the account's to override with.
     if (!existsSync(from) || existsSync(target)) continue;
     await writeFile(target, await readFile(from, "utf8"), "utf8");
-    report.copied.push(file);
+    report.adopted.push(file);
   }
 
-  // Project memory: per project, so it moves slug by slug.
   const projects = join(dir, "projects");
   if (existsSync(projects)) {
     for (const slug of await readdir(projects)) {
       const from = join(projects, slug, "memory");
       if (linkState(from) !== "real") continue;
       const to = join(sharedMemoryDir(), slug);
-      if (existsSync(to) && (await readdir(to)).length > 0) {
-        report.skipped.push(`memory/${slug} (shared copy is not empty)`);
-        continue;
+      await mkdir(to, { recursive: true });
+      await mergeInto(from, to, `${from}.pre-balance`, report);
+      if (await isEmptyDir(from)) {
+        await rm(from, { recursive: true, force: true });
+        report.adopted.push(`memory/${slug}`);
       }
-      await rm(to, { recursive: true, force: true });
-      await mkdir(dirname(to), { recursive: true });
-      await rename(from, to);
-      await symlink(to, from, "dir");
-      report.moved.push(`projects/${slug}/memory`);
     }
   }
 
   // User-scope MCP servers out of .claude.json, plus every project's approval
-  // state — the two things that decide whether a second account's MCP servers
+  // state — the two things that decide whether another account's MCP servers
   // come up at all.
   const claude = await readJson<ClaudeJson>(claudeJsonPath(dir));
   const userServers = (claude?.mcpServers ?? {}) as Record<string, unknown>;
   if (Object.keys(userServers).length > 0) {
     const mcp = (await readJson<{ mcpServers?: Record<string, unknown> }>(sharedMcpPath())) ?? {};
+    const before = Object.keys(mcp.mcpServers ?? {}).length;
     mcp.mcpServers = { ...userServers, ...(mcp.mcpServers ?? {}) };
-    await writeJson(sharedMcpPath(), mcp, 0o600);
-    report.copied.push(`${Object.keys(userServers).length} user-scope MCP server(s)`);
+    if (Object.keys(mcp.mcpServers).length > before) {
+      await writeJson(sharedMcpPath(), mcp, 0o600);
+      report.adopted.push(`${Object.keys(mcp.mcpServers).length - before} MCP server(s)`);
+    }
   }
   let projectCount = 0;
   for (const cwd of Object.keys(claude?.projects ?? {})) {
@@ -365,19 +481,19 @@ export async function adoptFrom(name: string, dirs: readonly string[]): Promise<
     const after = JSON.stringify((await readJson<Record<string, ProjectState>>(sharedProjectsPath()))?.[cwd] ?? null);
     if (before !== after) projectCount += 1;
   }
-  if (projectCount > 0) report.copied.push(`MCP/trust state for ${projectCount} project(s)`);
+  if (projectCount > 0) report.adopted.push(`MCP/trust state for ${projectCount} project(s)`);
 
   return report;
 }
 
 // Every slug the shared layer knows about, linked into an account — the
-// launch path only ever links the project you're launching in.
-export async function linkAllProjectMemory(dir: string, force = false): Promise<number> {
+// launch path also links the project you're standing in, which may be new.
+export async function linkAllProjectMemory(dir: string): Promise<number> {
   if (!existsSync(sharedMemoryDir())) return 0;
   let n = 0;
   for (const slug of await readdir(sharedMemoryDir())) {
     await mkdir(join(dir, "projects", slug), { recursive: true });
-    if (await linkInto(join(dir, "projects", slug, "memory"), join(sharedMemoryDir(), slug), force)) n += 1;
+    if (await linkInto(join(dir, "projects", slug, "memory"), join(sharedMemoryDir(), slug))) n += 1;
   }
   return n;
 }
