@@ -20,7 +20,7 @@ beforeEach(async () => {
 afterEach(async () => {
   if (previousHome === undefined) delete process.env.BALANCE_HOME;
   else process.env.BALANCE_HOME = previousHome;
-  for (const key of ["BALANCE_SHARED", "BALANCE_CLAUDE_BINARY", "BALANCE_LOG_LEVEL"]) {
+  for (const key of ["BALANCE_CLAUDE_BINARY", "BALANCE_LOG_LEVEL"]) {
     if (previousEnv[key] === undefined) delete process.env[key];
     else process.env[key] = previousEnv[key];
   }
@@ -38,37 +38,22 @@ async function writeRaw(value: unknown): Promise<void> {
 const account = (name: string): Account => ({ name, email: null, last_used_at: null, added_at: 1 });
 
 describe("loadConfig", () => {
-  test("fills in the shared defaults for a config written before the layer existed", async () => {
-    await writeRaw({ active: "work", claude_binary: "claude", log_level: "info", accounts: [account("work")] });
+  test("fills in the defaults for a config that only sets some keys", async () => {
+    await writeRaw({ accounts: [account("work")] });
     const cfg = await loadConfig(configPath());
 
-    expect(cfg.shared.enabled).toBe(true);
-    expect(cfg.shared.dirs).toEqual(["skills", "agents", "commands", "plugins"]);
-    expect(cfg.shared.projects).toBe(true);
-  });
-
-  test("keeps the other defaults when only one knob is overridden", async () => {
-    await writeRaw({ accounts: [], shared: { projects: false } });
-    const cfg = await loadConfig(configPath());
-
-    expect(cfg.shared.projects).toBe(false);
-    expect(cfg.shared.enabled).toBe(true);
-    expect(cfg.shared.mcp).toBe(true);
-  });
-
-  test("honours a disabled layer", async () => {
-    await writeRaw({ accounts: [], shared: { enabled: false } });
-    expect((await loadConfig(configPath())).shared.enabled).toBe(false);
+    expect(cfg.active).toBeNull();
+    expect(cfg.claude_binary).toBe("claude");
+    expect(cfg.log_level).toBe("info");
   });
 
   test("returns an empty config when there is no file", async () => {
     const cfg = await loadConfig(join(home, "missing.json"));
     expect(cfg.accounts).toEqual([]);
-    expect(cfg.shared.enabled).toBe(true);
   });
 
   test("survives a config whose accounts key is not an array", async () => {
-    await writeRaw({ accounts: "nonsense", shared: {} });
+    await writeRaw({ accounts: "nonsense" });
     expect((await loadConfig(configPath())).accounts).toEqual([]);
   });
 
@@ -92,38 +77,23 @@ describe("loadConfig", () => {
 });
 
 describe("emptyConfig", () => {
-  test("does not share one shared-settings object between configs", () => {
+  test("does not share one accounts array between configs", () => {
     const a = emptyConfig();
     const b = emptyConfig();
-    a.shared.enabled = false;
-    expect(b.shared.enabled).toBe(true);
+    a.accounts.push(account("work"));
+    expect(b.accounts).toEqual([]);
   });
 });
 
 describe("envOverride", () => {
-  test("BALANCE_SHARED=0 disables the layer without touching the file", () => {
-    process.env.BALANCE_SHARED = "0";
-    const cfg = emptyConfig();
-    expect(envOverride(cfg).shared.enabled).toBe(false);
-    expect(cfg.shared.enabled).toBe(true);
-  });
-
-  test("BALANCE_SHARED=false disables it too", () => {
-    process.env.BALANCE_SHARED = "false";
-    expect(envOverride(emptyConfig()).shared.enabled).toBe(false);
-  });
-
-  test("any other value leaves the layer alone", () => {
-    process.env.BALANCE_SHARED = "1";
-    expect(envOverride(emptyConfig()).shared.enabled).toBe(true);
-  });
-
-  test("still overrides the binary and log level", () => {
+  test("overrides the binary and log level without touching the file", () => {
     process.env.BALANCE_CLAUDE_BINARY = "/opt/claude";
     process.env.BALANCE_LOG_LEVEL = "debug";
-    const cfg = envOverride(emptyConfig());
+    const onDisk = emptyConfig();
+    const cfg = envOverride(onDisk);
     expect(cfg.claude_binary).toBe("/opt/claude");
     expect(cfg.log_level).toBe("debug");
+    expect(onDisk.claude_binary).toBe("claude");
   });
 });
 

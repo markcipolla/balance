@@ -1,19 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { basename } from "node:path";
 import { readCredentials, writeCredentials, type ClaudeCredentials } from "./credentials";
 import { refreshAccessToken } from "./oauth";
 import { writeKeychainCreds, isMac } from "./keychain";
-import {
-  applySharedLayer,
-  buildLaunchMcpConfig,
-  harvestProjectState,
-  sharedActive,
-  sharedDir,
-  sharedLaunchArgs,
-} from "./shared";
-import { isSyncStale, needsColdSync, syncConnectors } from "./connectors";
-import type { SharedSettings } from "./types";
 import { log } from "./log";
 
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
@@ -44,31 +33,6 @@ async function loadFreshCredentials(accountDir: string): Promise<ClaudeCredentia
   }
 }
 
-// Keep the shared connector set current without making every launch wait on a
-// network round-trip.
-//
-// A cold start has to block: the shared file holds no connectors yet, so
-// skipping the sync would launch this session with no MCP servers at all. Once
-// there is a usable set, a stale listing refreshes alongside the session
-// instead — mcp.json has already been read by the time it lands, so the result
-// applies from the next launch, which is soon enough for a list that changes
-// about never.
-async function refreshConnectors(dir: string, shared: SharedSettings, binary: string): Promise<void> {
-  try {
-    if (await needsColdSync()) {
-      log.info("reading claude.ai connectors into the shared layer — first run, this takes a moment");
-      await syncConnectors(dir, binary);
-      return;
-    }
-    if (!(await isSyncStale(basename(dir), shared.connector_ttl_hours))) return;
-    void syncConnectors(dir, binary).catch((err: unknown) => {
-      log.debug("background connector sync failed", { err: String(err) });
-    });
-  } catch (err) {
-    log.warn("could not sync claude.ai connectors — using the shared set as-is", { err: String(err) });
-  }
-}
-
 // Launch Claude Code as a specific account.
 //
 // Auth precedence Claude Code TUI uses on macOS:
@@ -87,7 +51,6 @@ export async function launchClaudeCode(
   claudeConfigDir: string,
   extraArgs: string[] = [],
   binary: string = "claude",
-  shared?: SharedSettings,
 ): Promise<void> {
   if (!existsSync(claudeConfigDir)) {
     log.error("account directory not found", { dir: claudeConfigDir });
@@ -107,33 +70,6 @@ export async function launchClaudeCode(
     }
   }
 
-  // The shared config layer, pushed down into this account dir. Both halves
-  // run while Claude Code is *not* running: .claude.json is rewritten from
-  // under us the moment the child starts, so we touch it before spawn and
-  // read it back only after exit.
-  const cwd = process.cwd();
-  const useShared = shared !== undefined && sharedActive(shared);
-  let args = extraArgs;
-  if (useShared) {
-    try {
-      const report = await applySharedLayer(claudeConfigDir, cwd, shared);
-      // Only the first launch of an account has anything to say here.
-      if (report.adopted.length > 0) {
-        log.info(`hoisted into ${sharedDir()}: ${report.adopted.join(", ")}`);
-      }
-      for (const path of report.setAside) {
-        log.warn("kept a conflicting copy instead of merging it", { path });
-      }
-      if (shared.connectors) await refreshConnectors(claudeConfigDir, shared, binary);
-      // Null unless strict mode is on, in which case this is shared/mcp.json
-      // plus whatever the project has already been approved for.
-      const mcpConfig = await buildLaunchMcpConfig(claudeConfigDir, cwd, shared);
-      args = [...extraArgs, ...sharedLaunchArgs(shared, extraArgs, mcpConfig ?? undefined)];
-    } catch (err) {
-      log.warn("could not apply the shared config layer — launching without it", { err: String(err) });
-    }
-  }
-
   const env: Record<string, string | undefined> = {
     ...process.env,
     CLAUDE_CONFIG_DIR: claudeConfigDir,
@@ -142,18 +78,12 @@ export async function launchClaudeCode(
     CLAUDE_CODE_OAUTH_TOKEN: creds.claudeAiOauth.accessToken,
   };
 
-  const child = spawn(binary, args, {
+  const child = spawn(binary, extraArgs, {
     stdio: "inherit",
     env,
   });
 
-  child.on("exit", async (code, signal) => {
-    // Carry anything the session decided — MCP approvals, a trust dialog —
-    // back up to the shared layer, so the next account inherits it.
-    if (useShared && shared.projects) {
-      try { await harvestProjectState(claudeConfigDir, cwd); }
-      catch (err) { log.debug("could not harvest project state", { err: String(err) }); }
-    }
+  child.on("exit", (code, signal) => {
     if (signal) process.kill(process.pid, signal);
     else process.exit(code ?? 0);
   });

@@ -8,8 +8,6 @@ import {
   runAccountRemove,
   runAccountSwitch,
   runRun,
-  runSharedStatus,
-  runSharedSync,
   usage,
 } from "./cli";
 
@@ -69,11 +67,6 @@ async function main(): Promise<void> {
         process.exit(await walk(ACCOUNT_TREE, ["account"], rest));
         return;
 
-      // The shared config layer needs no setting up — this is just the view.
-      case "shared":
-        process.exit(rest[0] === "sync" ? await runSharedSync(rest.slice(1)) : await runSharedStatus(rest));
-        return;
-
       // Flat aliases matching the old (v0.x) CLI surface.
       case "login":
         process.exit(await runAccountAdd(rest));
@@ -103,6 +96,20 @@ async function main(): Promise<void> {
       case "-v":
         process.stdout.write(`balance ${VERSION}\n`);
         process.exit(0);
+        return;
+
+      // Removed in 1.4.0 along with the shared config layer. Anything that
+      // layer already wrote is still on disk and still works — say where, so
+      // a 1.3.x user can undo it by hand if they want their accounts back to
+      // holding their own config.
+      case "shared":
+        console.error(
+          `The 'shared' command was removed in 1.4.0 — balance no longer hoists config out of your account dirs.\n` +
+          `Anything an earlier version shared is left as it was: ~/.balance/shared holds the hoisted copy,\n` +
+          `and each ~/.balance/accounts/<name>/ may still symlink skills/, agents/, commands/ and plugins/ into it.\n` +
+          `Replace a symlink with a real directory to give that account its own copy back.`,
+        );
+        process.exit(2);
         return;
 
       // Deprecated: proxy-era commands that no longer make sense. Fail fast
