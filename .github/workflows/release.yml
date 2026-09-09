@@ -57,8 +57,11 @@ jobs:
           RELEASE_REPO: ${{ github.repository }}
         run: |
           if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
-            echo "::warning::HOMEBREW_TAP_TOKEN not set; skipping tap update."
-            echo "Add a fine-grained PAT with contents:write on markcipolla/homebrew-tap as HOMEBREW_TAP_TOKEN."
-            exit 0
+            echo "::error::HOMEBREW_TAP_TOKEN is not set, so the Homebrew tap was not updated."
+            echo "::error::The release binaries published fine, but brew users stay on the previous version until this is fixed."
+            echo "Create a fine-grained PAT with contents:write on markcipolla/homebrew-tap, then:"
+            echo "  gh secret set HOMEBREW_TAP_TOKEN -R markcipolla/balance"
+            echo "Then re-run this workflow to publish the formula for v$VERSION."
+            exit 1
           fi
           scripts/update-tap.sh "$VERSION"
