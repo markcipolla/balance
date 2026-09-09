@@ -24,7 +24,6 @@ describe("positional", () => {
   // Boolean flags take no value — treating them as if they did would eat the
   // account name that follows.
   test("does not swallow the name after a boolean flag", () => {
-    expect(positional(["--no-shared", "work"])).toEqual(["work"]);
     expect(positional(["--no-browser", "work"])).toEqual(["work"]);
     expect(positional(["--usage", "work"])).toEqual(["work"]);
   });

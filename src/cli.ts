@@ -12,18 +12,6 @@ import {
   writeConfig,
 } from "./config";
 import { accountDir, defaultConfigPath } from "./paths";
-import {
-  linkReport,
-  connectorStatePath,
-  sharedActive,
-  sharedDir,
-  sharedMcpPath,
-  sharedMemoryPath,
-  sharedSettingsPath,
-  strictMcp,
-} from "./shared";
-import { syncConnectors } from "./connectors";
-import { readJson } from "./jsonfile";
 import { writeCredentials } from "./credentials";
 import { runOAuthLogin } from "./login";
 import { launchClaudeCode } from "./launcher";
@@ -42,7 +30,7 @@ export function flag(args: string[], name: string): string | undefined {
 
 export function positional(args: string[]): string[] {
   const out: string[] = [];
-  const skip = new Set(["--no-browser", "--no-shared", "--force", "--usage", "-u"]);
+  const skip = new Set(["--no-browser", "--usage", "-u"]);
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--") {
@@ -62,11 +50,6 @@ export function positional(args: string[]): string[] {
 export function passThroughArgs(args: string[]): string[] {
   const sep = args.indexOf("--");
   return sep >= 0 ? args.slice(sep + 1) : [];
-}
-
-// `--no-shared` on a single run, without editing config.json.
-function sharedFor(cfg: Config, args: string[]) {
-  return args.includes("--no-shared") ? { ...cfg.shared, enabled: false } : cfg.shared;
 }
 
 function configPathOf(args: string[]): string {
@@ -230,94 +213,8 @@ export async function runRun(args: string[]): Promise<number> {
 
   const dir = accountDir(chosen.name);
   console.log(dim(`Launching Claude Code as "${chosen.name}" (${dir})`));
-  await launchClaudeCode(dir, forwardedArgs, runtime.claude_binary, sharedFor(runtime, args));
+  await launchClaudeCode(dir, forwardedArgs, runtime.claude_binary);
   return 0; // never reached — launcher takes over the process
-}
-
-// ---------- shared: status ----------
-
-export async function runSharedStatus(args: string[]): Promise<number> {
-  const configPath = configPathOf(args);
-  const cfg = await loadOrEmpty(configPath);
-  if (!sharedActive(cfg.shared)) {
-    console.log(`Shared config layer: ${yellow("disabled")} ${dim("(\"shared\": {\"enabled\": false} in config.json)")}`);
-    return 0;
-  }
-  if (!existsSync(sharedDir())) {
-    console.log(`Shared config layer: ${green("on")} ${dim("— nothing hoisted yet; it fills up as you launch each account")}`);
-    return 0;
-  }
-  console.log(`Shared config layer: ${green("on")}  ${dim(sharedDir())}\n`);
-  const flags: string[] = [];
-  if (cfg.shared.mcp && existsSync(sharedMcpPath())) flags.push(`--mcp-config${strictMcp(cfg.shared) ? " --strict-mcp-config" : ""}`);
-  if (cfg.shared.settings && existsSync(sharedSettingsPath())) flags.push("--settings");
-  console.log(`  launch flags   ${flags.length > 0 ? flags.join(" ") : dim("none")}`);
-  console.log(`  user memory    ${existsSync(sharedMemoryPath()) ? green("shared/CLAUDE.md (imported per account)") : dim("—")}`);
-  console.log(`  project state  ${cfg.shared.projects ? green("MCP approvals + trust carried between accounts") : dim("off")}`);
-  console.log(`  connectors     ${await connectorSummary(cfg)}\n`);
-  for (const a of cfg.accounts) {
-    if (!existsSync(accountDir(a.name))) continue;
-    const states = linkReport(accountDir(a.name), cfg.shared.dirs)
-      .map((r) => `${r.name}: ${r.state === "shared" ? green(r.state) : r.state === "own copy" ? yellow(r.state) : dim(r.state)}`)
-      .join("  ");
-    console.log(`  ${bold(a.name)}  ${states}`);
-  }
-  console.log(dim("\nAn account joins the layer the next time you launch it."));
-  return 0;
-}
-
-
-interface ConnectorState {
-  managed?: string[];
-  accounts?: Record<string, { at: number; names: string[] }>;
-}
-
-// claude.ai connectors are the only MCP source with no file to point at, so
-// the status line reports what the last sync managed to capture rather than
-// what is configured.
-async function connectorSummary(cfg: Config): Promise<string> {
-  if (!cfg.shared.connectors) return dim("off — each account keeps its own claude.ai set");
-  const state = await readJson<ConnectorState>(connectorStatePath());
-  const managed = state?.managed ?? [];
-  if (managed.length === 0) return dim("on — nothing synced yet; the next launch reads them");
-  const seen = Object.keys(state?.accounts ?? {}).length;
-  return green(`${managed.length} shared across ${seen} account${seen === 1 ? "" : "s"}`);
-}
-
-// ---------- shared: sync ----------
-
-// The launch path already refreshes on a TTL; this is for when you have just
-// added a connector on claude.ai and do not want to wait for it.
-export async function runSharedSync(args: string[]): Promise<number> {
-  const configPath = configPathOf(args);
-  const cfg = await loadOrEmpty(configPath);
-  if (!sharedActive(cfg.shared)) {
-    console.error("the shared config layer is disabled — nothing to sync into");
-    return 1;
-  }
-  const named = args.find((a) => !a.startsWith("-"));
-  const targets = named ? cfg.accounts.filter((a) => a.name === named) : cfg.accounts;
-  if (targets.length === 0) {
-    console.error(named ? `no such account: ${named}` : "no accounts yet — run: balance account add");
-    return 1;
-  }
-  let failed = 0;
-  for (const a of targets) {
-    const dir = accountDir(a.name);
-    if (!existsSync(dir)) continue;
-    const res = await syncConnectors(dir, cfg.claude_binary, { account: a.name });
-    if (!res) {
-      console.log(`  ${bold(a.name)}  ${yellow("could not list connectors")}`);
-      failed += 1;
-      continue;
-    }
-    const parts = [
-      res.added.length > 0 ? green(`+${res.added.length}`) : "",
-      res.retired.length > 0 ? yellow(`-${res.retired.length}`) : "",
-    ].filter(Boolean);
-    console.log(`  ${bold(a.name)}  ${parts.length > 0 ? parts.join(" ") : dim("no change")}`);
-  }
-  return failed === targets.length ? 1 : 0;
 }
 
 // ---------- usage / dispatch ----------
@@ -335,27 +232,17 @@ usage:
   balance account switch <name>                       change default account
   balance account remove <name>                       delete an account (removes credentials on disk)
 
-  balance shared                                      show what the shared config layer holds
-  balance shared sync [<name>]                        re-read claude.ai connectors into the shared MCP set
-
 flags:
   --config <path>   config file (default: ~/.balance/config.json)
-  --no-shared       launch without the shared config layer (run only)
 
 env:
   BALANCE_CLAUDE_BINARY   path to the claude executable (default: "claude" on PATH)
   BALANCE_LOG_LEVEL       debug | info | warn | error
-  BALANCE_SHARED          set to 0 to disable the shared config layer
 
 Each balance account is an isolated Claude Code profile — its own OAuth
 credentials in ~/.balance/accounts/<name>/. When you 'balance run' an
 account, balance launches Claude Code with CLAUDE_CONFIG_DIR pointed at
 that directory, so it signs in as that account without touching your
 machine's default ~/.claude.
-
-Identity stays per-account; configuration does not have to. Skills, agents,
-commands, plugins, MCP servers, settings and memory are hoisted into one
-~/.balance/shared as each account is launched, and pushed back down into
-whichever account you pick. No setup — 'balance shared' shows the result.
 `;
 }
