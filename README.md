@@ -170,4 +170,8 @@ git tag v1.0.0 && git push --tags
 
 The workflow cross-compiles for darwin arm64/amd64 and linux arm64/amd64, publishes the release, and pushes a fresh `Formula/balance.rb` to the tap.
 
-Requires the `HOMEBREW_TAP_TOKEN` repo secret (fine-grained PAT with `Contents: Read and write` on `markcipolla/homebrew-tap`). Without it, the workflow still publishes the GitHub Release and skips the tap push with a warning.
+Requires the `HOMEBREW_TAP_TOKEN` repo secret (fine-grained PAT with `Contents: Read and write` on `markcipolla/homebrew-tap`). Without it, the workflow publishes the GitHub Release and then fails on the tap push, so a release that never reached brew users can't pass as green. Set the secret and re-run the failed job to publish the formula.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
