@@ -1,8 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { refreshAccessToken } from "./oauth";
-import { readCredentials, writeCredentials, type ClaudeCredentials } from "./credentials";
+import { freshCredentials } from "./credentials";
 import { log } from "./log";
 
 // The endpoint Claude Code itself hits for /status. Verified by extracting
@@ -12,7 +11,6 @@ const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
 const CACHE_FILE = "usage-cache.json";
 const CACHE_TTL_MS = 60 * 1000;
-const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 
 export interface UsageWindow {
   utilization: number | null;   // 0.0..1.0
@@ -47,22 +45,8 @@ function emptyUsage(fetched_at: number, error: string | null = null): AccountUsa
 }
 
 async function accessTokenFor(accountDir: string): Promise<string | null> {
-  const creds = await readCredentials(accountDir);
-  if (!creds) return null;
-  const { accessToken, refreshToken, expiresAt, scopes } = creds.claudeAiOauth;
-  if (expiresAt - REFRESH_MARGIN_MS > Date.now()) return accessToken;
   try {
-    const t = await refreshAccessToken(refreshToken);
-    const refreshed: ClaudeCredentials = {
-      claudeAiOauth: {
-        accessToken: t.access_token,
-        refreshToken: t.refresh_token,
-        expiresAt: t.expires_at,
-        scopes,
-      },
-    };
-    await writeCredentials(accountDir, refreshed);
-    return t.access_token;
+    return (await freshCredentials(accountDir))?.claudeAiOauth.accessToken ?? null;
   } catch (err) {
     log.warn("token refresh failed while fetching usage", { err: String(err) });
     return null;

@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { userInfo } from "node:os";
 import type { ClaudeCredentials } from "./credentials";
 import { log } from "./log";
+import { baseDir } from "./paths";
 
 // macOS Keychain entry Claude Code TUI actually reads from. On macOS the TUI
 // checks Keychain BEFORE any env var or file — so to make Claude Code launch
@@ -88,4 +91,28 @@ export async function writeKeychainCreds(creds: ClaudeCredentials): Promise<bool
     return false;
   }
   return true;
+}
+
+// The Keychain slot has no idea which balance account it holds, so remember
+// who we last put there. Only that account may adopt what's in the slot.
+function ownerFile(): string {
+  return join(baseDir(), "keychain-owner");
+}
+
+export async function setKeychainOwner(accountDir: string): Promise<void> {
+  try { await writeFile(ownerFile(), accountDir + "\n", "utf8"); } catch { /* best-effort */ }
+}
+
+async function keychainOwner(): Promise<string | null> {
+  try { return (await readFile(ownerFile(), "utf8")).trim(); } catch { return null; }
+}
+
+// Claude Code refreshes its token into the Keychain, and each refresh revokes
+// the previous refresh token — leaving the copy in .credentials.json dead.
+// Returns the Keychain's credentials when they belong to this account.
+export async function readKeychainCredsFor(accountDir: string): Promise<ClaudeCredentials | null> {
+  if (!isMac() || (await keychainOwner()) !== accountDir) return null;
+  const o = (await readKeychainBlob())?.claudeAiOauth as ClaudeCredentials["claudeAiOauth"] | undefined;
+  if (!o?.accessToken || !o.refreshToken || typeof o.expiresAt !== "number") return null;
+  return { claudeAiOauth: { ...o, scopes: o.scopes ?? [] } };
 }

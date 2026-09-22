@@ -1,35 +1,17 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readCredentials, writeCredentials, type ClaudeCredentials } from "./credentials";
-import { refreshAccessToken } from "./oauth";
-import { writeKeychainCreds, isMac } from "./keychain";
+import { freshCredentials, readCredentials, type ClaudeCredentials } from "./credentials";
+import { writeKeychainCreds, setKeychainOwner, isMac } from "./keychain";
 import { log } from "./log";
 
-const REFRESH_MARGIN_MS = 5 * 60 * 1000;
-
-// Load credentials for the account, refreshing on disk if within expiry
-// margin. Returns null if the account has no credentials yet.
+// Returns null if the account has no credentials yet. On refresh failure,
+// returns the stale creds so Claude Code surfaces the auth error itself.
 async function loadFreshCredentials(accountDir: string): Promise<ClaudeCredentials | null> {
-  const creds = await readCredentials(accountDir);
-  if (!creds) return null;
-  const { refreshToken, expiresAt, scopes } = creds.claudeAiOauth;
-  if (expiresAt - REFRESH_MARGIN_MS > Date.now()) return creds;
   try {
-    log.info("refreshing access token", { dir: accountDir });
-    const t = await refreshAccessToken(refreshToken);
-    const refreshed: ClaudeCredentials = {
-      claudeAiOauth: {
-        accessToken: t.access_token,
-        refreshToken: t.refresh_token,
-        expiresAt: t.expires_at,
-        scopes,
-      },
-    };
-    await writeCredentials(accountDir, refreshed);
-    return refreshed;
+    return await freshCredentials(accountDir);
   } catch (err) {
     log.warn("token refresh failed — Claude Code may prompt for a fresh login", { err: String(err) });
-    return creds; // return stale creds; Claude Code will surface the auth error
+    return readCredentials(accountDir);
   }
 }
 
@@ -65,6 +47,7 @@ export async function launchClaudeCode(
 
   if (isMac()) {
     const ok = await writeKeychainCreds(creds);
+    if (ok) await setKeychainOwner(claudeConfigDir);
     if (!ok) {
       log.warn("could not update Keychain — Claude Code may launch as a different account or prompt for login");
     }
