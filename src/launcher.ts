@@ -1,18 +1,18 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { freshCredentials, readCredentials, type ClaudeCredentials } from "./credentials";
+import { basename } from "node:path";
+import { freshCredentials, type ClaudeCredentials } from "./credentials";
 import { writeKeychainCreds, setKeychainOwner, isMac } from "./keychain";
 import { log } from "./log";
 
-// Returns null if the account has no credentials yet. On refresh failure,
-// returns the stale creds so Claude Code surfaces the auth error itself.
-async function loadFreshCredentials(accountDir: string): Promise<ClaudeCredentials | null> {
-  try {
-    return await freshCredentials(accountDir);
-  } catch (err) {
-    log.warn("token refresh failed — Claude Code may prompt for a fresh login", { err: String(err) });
-    return readCredentials(accountDir);
-  }
+// Refusing to launch beats launching as the wrong account: on macOS the
+// Keychain holds one login for the whole machine, so a dead token here means
+// we'd either overwrite a working login with a dead one, or leave the slot
+// alone and hand the user whichever account happens to be in it.
+function refuseStale(accountDir: string, err: unknown): never {
+  log.error("this account's login has expired and could not be renewed", { dir: accountDir, err: String(err) });
+  log.error(`sign in again with: balance account add --name ${basename(accountDir)}`);
+  process.exit(1);
 }
 
 // Launch Claude Code as a specific account.
@@ -39,7 +39,12 @@ export async function launchClaudeCode(
     process.exit(1);
   }
 
-  const creds = await loadFreshCredentials(claudeConfigDir);
+  let creds: ClaudeCredentials | null;
+  try {
+    creds = await freshCredentials(claudeConfigDir);
+  } catch (err) {
+    refuseStale(claudeConfigDir, err);
+  }
   if (!creds) {
     log.error("account has no credentials — run: balance account add", { dir: claudeConfigDir });
     process.exit(1);
@@ -48,9 +53,7 @@ export async function launchClaudeCode(
   if (isMac()) {
     const ok = await writeKeychainCreds(creds);
     if (ok) await setKeychainOwner(claudeConfigDir);
-    if (!ok) {
-      log.warn("could not update Keychain — Claude Code may launch as a different account or prompt for login");
-    }
+    else log.warn("could not update Keychain — Claude Code may launch as a different account or prompt for login");
   }
 
   const env: Record<string, string | undefined> = {
